@@ -1,6 +1,6 @@
-# MoA: Mixture of Sparse Attention for Automatic Large Languege Model Compression
+# MoA: Mixture of Sparse Attention for Automatic Large Language Model Compression
 
-## Env Setup
+## Environment Setup
 ```bash
 conda create -n moa python=3.10.13
 pip install -r requirement.txt
