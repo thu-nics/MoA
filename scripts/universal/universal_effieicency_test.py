@@ -141,7 +141,7 @@ def run_model(num_iters=5, device="cuda:0"):
         model.model.use_block_sparse_attention_lut(permute_head=True, sparse_decode=True)
         set_static_attention_lut(args.lut_path, None, model.model.layers, args.block_size, permute_head=True, sparse_decode=True)
 
-    test_file = '70_lines.jsonl'
+    test_file = 'data/70_lines.jsonl'
     with open(test_file, 'r') as f:
         json_list = list(f)
 
