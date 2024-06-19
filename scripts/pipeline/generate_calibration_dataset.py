@@ -28,7 +28,7 @@ dataset
 """
 dataset_name = args.dataset_name
 
-huggingface_dataset_path = "fuvty/MoA_Human"
+huggingface_dataset_path = "nics-efc/MoA_Long_HumanQA"
 output_path_base = args.output_path_base
 
 dataset_name_short_dict = {

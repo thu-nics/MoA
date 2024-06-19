@@ -225,7 +225,7 @@ if __name__ == "__main__":
     model_name = args.model_name
 
     # load dataset
-    dataset_path = "jason-huang03/retrieval"
+    dataset_path = "nics-efc/MoA_Long_Retrieval"
 
     if args.dataset_path is not None:
         dataset_path = args.dataset_path

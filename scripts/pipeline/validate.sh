@@ -14,7 +14,7 @@ MODEL_NAME=$4
 
 mkdir $RESULT_DIR
 
-dataset_dir="fuvty/MoA_Human"
+dataset_dir="nics-efc/MoA_Long_HumanQA"
 split="valid"
 length=12288
 length_level_down=2
@@ -28,7 +28,7 @@ do
   RESULT_PATH="${RESULT_DIR}/validation_${i}.csv"
 
   # Run the Python command with the dynamically set paths
-  command="CUDA_VISIBLE_DEVICES=0 python scripts/universal/universal_lut_evaluate.py \
+  command="CUDA_VISIBLE_DEVICES=0 python scripts/universal/perplexity_evaluate.py \
     --model_name $MODEL_NAME \
     --max_length ${length} \
     --dataset_dir $dataset_dir \

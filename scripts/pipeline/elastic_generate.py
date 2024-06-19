@@ -20,19 +20,19 @@ parser.add_argument('--extend_length', type=int, nargs='+', default=[8192, 16384
 parser.add_argument('--density_bounds', type=float, nargs='+', default=[1.00, 0.77, 0.58, 0.46, 0.25, 0.13], help='density bounds')
 parser.add_argument('--importance_tensor_dir', type=str, required=True, help='importance tensor directory')
 parser.add_argument('--output_length', type=int, nargs='+', default=[2048, 4096, 8192, 16384], help='output length')
-parser.add_argument('--num_plan_limit', type=int, default=None, help='number of plans to construct')
+parser.add_argument('--num_plan_limit', type=int, default=2, help='number of plans to construct')
 parser.add_argument('--num_alphas', type=int, default=None, help='number of alphas')
 parser.add_argument('--alpha', type=float, default=None, help='for uniform extend')
 parser.add_argument('--alpha_interval', type=int, default=1024, help='interval of alpha')
 parser.add_argument('--num_betas', type=int, default=9, help='number of alphas')
 parser.add_argument('--beta', type=float, default=None, help="for uniform extend")
-parser.add_argument('--latency_lower_bound_ratio', type=float, default=None, help='the ratio of the lower bound for latency optimization') 
+parser.add_argument('--latency_lower_bound_ratio', type=float, default=0.9, help='the ratio of the lower bound for latency optimization') 
 
 parser.add_argument('--device', type=str, default='cpu', help='device to run the code')
 parser.add_argument('--same_per_layer', action='store_true', help='whether to sum the importance tensor per layer')
 
 parser.add_argument('--block_size', type=int, default=64)
-parser.add_argument('--aggregating_block_size', type=int, default=1, help='aggregating block size for importance tensor')
+parser.add_argument('--aggregating_block_size', type=int, default=64, help='aggregating block size for importance tensor')
 
 parser.add_argument('--normalize_by_head', action='store_true', help='whether to make loss sum on every head the same')
 parser.add_argument('--normalize_by_layer', action='store_true', help='whether to make the loss sum on every layer the same')
