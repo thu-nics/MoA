@@ -117,3 +117,4 @@ CUDA_VISIBLE_DEVICES=0 python scripts/pipeline/longbench_evaluate.py --model_nam
 
 CUDA_VISIBLE_DEVICES=0 python scripts/pipeline/longbench_evaluate.py --model_name lmsys/vicuna-7b-v1.5-16k --max_length 15500 --eval longbench_fast --longbench_e --longbench_result_dir 7b/longbench_result --longbench_length_range 8k+ --use_lut --lut_path 7b/lut_result/lut_16384_plan_{i}.pt
 ```
+
