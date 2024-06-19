@@ -2,9 +2,9 @@
 
 ![intuition](assets/workflow.png)
 
-Mixture of Attention (MoA) overcomes the drawbacks of uniform sparse attention by searching heterogeneous elastic rules for each attention head using an automatic pipeline.
+Mixture of Attention (MoA) overcomes the drawbacks of uniform sparse attention by searching heterogeneous elastic rules for each attention head using an automatic pipeline. 
 
-The pipeline automatically compresses the LLM, beginning with the creation of a calibration dataset that includes long dependency and model alignment. This dataset is used for gradient-based profiling to assess the impact of each attention position on prediction loss. Following profiling, MoA optimizes sparse attention configurations for each model layer and attention head, aiming to minimize accuracy loss within specified density budgets.
+MoA achieves a $1.2-1.4\times$ GPU memory reduction and boosts the maximum decode throughput by $5.5-6.7 \times$ for 7B and 13B dense models on a single GPU, with minimal impact on performance.
 
 ## Environment Setup
 
@@ -12,12 +12,14 @@ First, create and activate the Conda environment using the following commands:
 
 ```bash
 conda create -n moa python=3.10.13
+conda activate moa
 pip install -r requirement.txt
 pip install -e .
-conda activate moa
 ```
 
 ## Automatic Search Pipeline
+
+The pipeline automatically compresses the LLM, beginning with the creation of a calibration dataset that includes long dependency and model alignment. This dataset is used for gradient-based profiling to assess the impact of each attention position on prediction loss. Following profiling, MoA optimizes sparse attention configurations for each model layer and attention head, aiming to minimize accuracy loss within specified density budgets.
 
 ### Calibration Dataset Generation
 
