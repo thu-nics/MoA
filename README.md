@@ -8,13 +8,14 @@ MoA achieves a $1.2-1.4\times$ GPU memory reduction and boosts the maximum decod
 
 ## Environment Setup
 
-First, create and activate the Conda environment using the following commands:
+First, create the Conda environment and install the relevant packages using the following commands:
 
 ```bash
-conda create -n moa python=3.10.13
+conda create -n moa python=3.10
+conda activate moa
+
 pip install -r requirement.txt
 pip install -e .
-conda activate moa
 ```
 
 ## Automatic Search Pipeline
