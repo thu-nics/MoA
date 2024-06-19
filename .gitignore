@@ -1,0 +1,21 @@
+.vscode
+*__pycache__*
+
+7b*/
+
+# ignore model files
+*.bin
+*.pt
+
+# ignore installation files
+*.egg-info
+*.egg
+*.whl
+build/
+develop-eggs/
+
+# ignore the local files
+local/
+our_result/
+push_to_hub.py
+
