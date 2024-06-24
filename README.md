@@ -1,10 +1,22 @@
 # MoA: Mixture of Sparse Attention for Automatic Large Language Model Compression
+**[[arXiv](https://arxiv.org/abs/2406.14909)]**
 
 ![intuition](assets/workflow.png)
 
-Mixture of Attention (MoA) overcomes the drawbacks of uniform sparse attention by searching heterogeneous elastic rules for each attention head using an automatic pipeline. 
+Compressing the attention operation is crucial for the efficiency of processing long inputs. Existing sparse attention methods (more specifically, local attention methods), such as StreamingLLM, adopt uniform and fixed attention masks across different attention heads. Nevertheless, some heads need to attend to more distant information than others; and as the input sequence gets longer, some heads might need to increase their span more than others. In this work, we propose MoA that overcomes the drawbacks of uniform sparse attention by searching heterogeneous elastic rules for each attention head using an automatic pipeline. 
 
 MoA achieves a $1.2-1.4\times$ GPU memory reduction and boosts the maximum decode throughput by $5.5-6.7 \times$ for 7B and 13B dense models on a single GPU, with minimal impact on performance.
+
+If you find this repository or paper useful, you can cite
+```
+@misc{fu2024moa,
+      title={MoA: Mixture of Sparse Attention for Automatic Large Language Model Compression}, 
+      author={Tianyu Fu and Haofeng Huang and Xuefei Ning and Genghan Zhang and Boju Chen and Tianqi Wu and Hongyi Wang and Zixiao Huang and Shiyao Li and Shengen Yan and Guohao Dai and Huazhong Yang and Yu Wang},
+      year={2024},
+      eprint={2406.14909},
+      archivePrefix={arXiv}
+}
+```
 
 ## Environment Setup
 
@@ -24,8 +36,8 @@ The pipeline automatically compresses the LLM, beginning with the creation of a 
 
 ### Calibration Dataset Generation
 
-MoA creates the calibration dataset with long dependency and model alignment. 
-This process involves querying an LLM with original questions to collect its responses, which are then formatted into a standard Hugging Face `Dataset` item.
+MoA creates the calibration dataset with long dependency and model alignment. We publish the calibration dataset at [this HuggingFace Repository](https://huggingface.co/datasets/nics-efc/MoA_Long_HumanQA) with human-written answers. To ensure "model alignment", we should generate the model answers from the original dense LLM.
+This involves querying an LLM with original questions to collect its responses, which are then formatted into a standard Hugging Face `Dataset` item.
 
 ```bash
 python scripts/pipeline/generate_calibration_dataset.py --model_path lmsys/vicuna-7b-v1.5-16k --model_name vicuna-7b-v1.5-16k --output_path_base local/dataset
