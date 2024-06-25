@@ -113,7 +113,7 @@ We provide the example compression plans under the `examples` directory. You can
 Given the compression plan found by MoA, you can simply apply the plan to the model with few lines. 
 
 ```python
-from transformers import AutoModelForCausalLM
+from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
 from MoA.models.interface import update_model_function
 from MoA.attention.set import set_static_attention_lut
 
@@ -141,13 +141,13 @@ output = pipe(prompt)
 MoA aims to preserve the retrieval ability of the original dense model with a reduced impact on accuracy. To evaluate the retrieval performance of a specific plan at a given input length, use the following command, replacing `{i}` with the actual plan ID:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python scripts/pipeline/retrieval_evaluate.py --model_name lmsys/vicuna-7b-v1.5-16k --lut_path 7b/lut_result/lut_8192_plan_{i}.pt --output_dir 7b/retrieval_8k --length_level 8
+CUDA_VISIBLE_DEVICES=0 python scripts/evaluate/retrieval_evaluate.py --model_name lmsys/vicuna-7b-v1.5-16k --lut_path 7b/lut_result/lut_8192_plan_{i}.pt --output_dir 7b/retrieval_8k --length_level 8
 ```
 
 > Alternatively, you can use our example plans. When passing in multiple plans at different lengths, the correct length will be automatically selected according to the input length:
 > 
 > ```bash
-> CUDA_VISIBLE_DEVICES=0 python scripts/pipeline/retrieval_evaluate.py --model_name lmsys/vicuna-7b-v1.5-16k --lut_path examples/lmsys-vicuna-7b-v1.5-16k/lut_4096.pt examples/lmsys-vicuna-7b-v1.5-16k/lut_8192.pt examples/lmsys-vicuna-7b-v1.5-16k/lut_12288.pt examples/lmsys-vicuna-7b-v1.5-16k/lut_16384.pt --output_dir 7b/retrieval_8k --length_level 8
+> CUDA_VISIBLE_DEVICES=0 python scripts/evaluate/retrieval_evaluate.py --model_name lmsys/vicuna-7b-v1.5-16k --lut_path examples/lmsys-vicuna-7b-v1.5-16k/lut_4096.pt examples/lmsys-vicuna-7b-v1.5-16k/lut_8192.pt examples/lmsys-vicuna-7b-v1.5-16k/lut_12288.pt examples/lmsys-vicuna-7b-v1.5-16k/lut_16384.pt --output_dir 7b/retrieval_8k --length_level 8
 > ```
 
 ### LongBench
@@ -156,11 +156,11 @@ MoA strives to maintain the long-context understanding ability of the original d
 
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python scripts/pipeline/longbench_evaluate.py --model_name lmsys/vicuna-7b-v1.5-16k --max_length 3500 --eval longbench_fast --longbench_e --longbench_result_dir 7b/longbench_result --longbench_length_range 0-4k --use_lut --lut_path 7b/lut_result/lut_4096_plan_{i}.pt
+CUDA_VISIBLE_DEVICES=0 python scripts/evaluate/longbench_evaluate.py --model_name lmsys/vicuna-7b-v1.5-16k --max_length 3500 --eval longbench_fast --longbench_e --longbench_result_dir 7b/longbench_result --longbench_length_range 0-4k --use_lut --lut_path 7b/lut_result/lut_4096_plan_{i}.pt
 
-CUDA_VISIBLE_DEVICES=0 python scripts/pipeline/longbench_evaluate.py --model_name lmsys/vicuna-7b-v1.5-16k --max_length 7500 --eval longbench_fast --longbench_e --longbench_result_dir 7b/longbench_result --longbench_length_range 4-8k --use_lut --lut_path 7b/lut_result/lut_8192_plan_{i}.pt
+CUDA_VISIBLE_DEVICES=0 python scripts/evaluate/longbench_evaluate.py --model_name lmsys/vicuna-7b-v1.5-16k --max_length 7500 --eval longbench_fast --longbench_e --longbench_result_dir 7b/longbench_result --longbench_length_range 4-8k --use_lut --lut_path 7b/lut_result/lut_8192_plan_{i}.pt
 
-CUDA_VISIBLE_DEVICES=0 python scripts/pipeline/longbench_evaluate.py --model_name lmsys/vicuna-7b-v1.5-16k --max_length 15500 --eval longbench_fast --longbench_e --longbench_result_dir 7b/longbench_result --longbench_length_range 8k+ --use_lut --lut_path 7b/lut_result/lut_16384_plan_{i}.pt
+CUDA_VISIBLE_DEVICES=0 python scripts/evaluate/longbench_evaluate.py --model_name lmsys/vicuna-7b-v1.5-16k --max_length 15500 --eval longbench_fast --longbench_e --longbench_result_dir 7b/longbench_result --longbench_length_range 8k+ --use_lut --lut_path 7b/lut_result/lut_16384_plan_{i}.pt
 ```
 
 > Alternatively, you can use our example plans.
