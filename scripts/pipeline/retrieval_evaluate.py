@@ -41,7 +41,7 @@ def process_prompt(input, model, tokenizer, test_case: Dict, output_file: Option
 
     prompt_length = input.input_ids.shape[-1]
 
-    print(f"Prompt length: {prompt_length}")
+    # print(f"Prompt length: {prompt_length}")
     
     use_cache = True
 
@@ -55,8 +55,6 @@ def process_prompt(input, model, tokenizer, test_case: Dict, output_file: Option
     )[0]
     output = output[prompt_length:]
     output = tokenizer.batch_decode([output], skip_special_tokens=True)[0]
-
-    print(output)
 
     # Matching the last digit of the model output
     response_number = re.findall("\d+", output)
@@ -88,10 +86,10 @@ def process_prompt(input, model, tokenizer, test_case: Dict, output_file: Option
                     f.write("\n")
 
 
-    if expected_number == response_number:
-        print("Correct")
-    else:
-        print("Incorrect")
+    # if expected_number == response_number:
+    #     print("Correct")
+    # else:
+    #     print("Incorrect")
     
     return expected_number == response_number, summary
 
@@ -152,10 +150,16 @@ if __name__ == "__main__":
         help="Length level to test, the number is multiplied by token interval",
     )
     parser.add_argument(
-        "--token_iterval",
+        "--token_interval",
         type=int,
         default=1024,
-        help="Token iterval",
+        help="Token interval",
+    )
+    parser.add_argument(
+        "--test_num",
+        type=int,
+        default=10,
+        help="Number of test case for each length level and position interval",
     )
 
     parser.add_argument('--dataset_path', type=str, default=None)
@@ -244,22 +248,22 @@ if __name__ == "__main__":
         'context_length': [],
     }
 
-    token_iterval = args.token_iterval
+    token_interval = args.token_interval
     length_level = args.length_level
-    length_level_iterval = [token_iterval*i for i in length_level]
+    length_level_interval = [token_interval*i for i in length_level]
 
-    position_iterval = 0.1
-    inverse_position_iterval = int(1/position_iterval) # noqa
+    position_interval = 0.1
+    inverse_position_interval = int(1/position_interval) # noqa
     position_level = [i for i in range(1, 11)]
-    position_level_iterval = [position_iterval*i for i in position_level]
+    position_level_interval = [position_interval*i for i in position_level]
 
     # input length * position level
-    test_num_bound = 10
+    test_num_bound = args.test_num
 
     # noqa: random sample 100 items from the dataset
     # dataset = dataset.shuffle(seed=42).select(range(50))
     if args.use_streamingLLM:
-        context_length_range = [int(length * 0.5) for length in length_level_iterval]
+        context_length_range = [int(length * 0.5) for length in length_level_interval]
         print(context_length_range)
     else:
         context_length_range = [0.0]
@@ -267,14 +271,15 @@ if __name__ == "__main__":
 
     os.makedirs(args.output_dir, exist_ok=True)
 
-    for context_length in tqdm(context_length_range):
+    for context_length in tqdm(context_length_range, position=0):
         # initialize everything
-
         now = datetime.now()
         datetime_str = now.strftime("%Y%m%d-%H%M")
-        print(f"running with attention span: {context_length} at {datetime_str}")
-
+        print(f"running test at {datetime_str}")
         meshgrid_count = np.zeros((len(length_level), len(position_level)))
+
+        # process bar
+        pbar = tqdm(total=len(dataset)-1, position=1)
 
         # set the attention implementation here
         if args.use_streamingLLM:
@@ -285,43 +290,45 @@ if __name__ == "__main__":
             model = convert_kvcache_llama_heavy_recent(model, args.heavy, args.recent)
             print(f"using h2o, heavy: {args.heavy}, recent: {args.recent}")
 
-        for i, data in enumerate(tqdm(dataset)):
+        # start test
+        for i, data in enumerate(dataset):
+            pbar.update(1)
+
             prompt, stop_token_ids = generate_input(data, tokenizer, model_name)
 
             # check whether tokenized_len key is in data
             if 'tokenized_len' in data:
                 prompt_length = data['tokenized_len']
-                current_length_level = int((prompt_length - 1) // token_iterval) + 1
+                current_length_level = int((prompt_length - 1) // token_interval) + 1
                 if (current_length_level not in length_level):
                     continue
 
             input = tokenizer(prompt, return_tensors="pt")
 
+            # check length and record
             prompt_length = input.input_ids.shape[-1] # the length of tokenized prompt
-
-            current_length_level = int((prompt_length - 1) // token_iterval) + 1
-
-            current_position_level = floor((float(data['key_id']) * inverse_position_iterval / float(data['num_lines'])))
+            current_length_level = int((prompt_length - 1) // token_interval) + 1
+            current_position_level = floor((float(data['key_id']) * inverse_position_interval / float(data['num_lines'])))
             if (current_length_level not in length_level):
                 continue
             # current input length now become a index 
             current_length_level = length_level.index(current_length_level)
-            
             meshgrid_count[current_length_level, current_position_level] += 1
             if meshgrid_count[current_length_level, current_position_level] > test_num_bound:
                 continue
 
-            # print(f"prompt length: {prompt_length}")
+            # retrieval test
             is_correct, summary = process_prompt(input, model, tokenizer, data, stop_token_ids=stop_token_ids)
             
+            # record
+            pbar.write(f"Prompt_Length: {prompt_length}, Correct: {is_correct}, {summary}")
             result_dict['id'].append(i)
             result_dict['is_correct'].append(is_correct)
             result_dict['prompt_length'].append(prompt_length)
             result_dict['summary'].append(summary)
             result_dict['num_lines'].append(data['num_lines'])
             result_dict['key_id'].append(data['key_id'])
-            result_dict['length_level'].append(length_level_iterval[current_length_level])
-
+            result_dict['length_level'].append(length_level_interval[current_length_level])
             result_dict['context_length'].append(context_length)
 
         # save and visualize
@@ -340,20 +347,25 @@ if __name__ == "__main__":
             print("error in saving the result")
             pass
 
-    print("Whole process done")
+    print("Retrieval Evaluation Finished")
     now = datetime.now()
     datetime_str = now.strftime("%Y%m%d-%H%M")
     print(f"Finish at {datetime_str}")
 
+
+    # visualize and save the results
     df = pd.DataFrame(result_dict)
     print(df)
 
+    correct_rate = df['is_correct'].sum() / len(df)
+    print(f"The overall correct rate is {correct_rate:.4f}")
+
+    print(f"Saving the result to {args.output_dir}")
     output_dir = args.output_dir
     
-    df.to_csv(os.path.join(output_dir, f"test_result_{datetime_str}.csv"), index=False)
     # plot everything
+    df.to_csv(os.path.join(output_dir, f"test_result_{datetime_str}.csv"), index=False)
     plot_correct_rate_heatmap_input_length_position(df, os.path.join(output_dir, f"correct_rate_heatmap_{datetime_str}.png"))
-
     plot_data_count_heatmap_input_length_position(df, os.path.join(output_dir, f"data_point_distribution_heatmap.png"))
 
-    print("done")
+    print("Retrieval Visualization Finished")

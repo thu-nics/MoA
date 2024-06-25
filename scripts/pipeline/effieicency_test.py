@@ -48,7 +48,7 @@ parser.add_argument('--cuda_event', action='store_true')
 parser.add_argument('--cuda_cache', action="store_true")
 parser.add_argument('--record_memory', action='store_true')
 parser.add_argument('--memory_file_name', type=str, default=None)
-parser.add_argument('--test_mode', type=str, choices=['decode', 'prefill', 'whole'], default='prefill')
+parser.add_argument('--test_mode', type=str, choices=['decode', 'prefill', 'whole'], default='whole')
 
 args = parser.parse_args()
 
