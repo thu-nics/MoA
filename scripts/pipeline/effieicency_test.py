@@ -17,6 +17,7 @@ from MoA.models.llama.modeling_llama import LlamaModel_use_block_sparse_attentio
 from MoA.attention.set import set_static_attention_lut
 
 # !!! remember to calculate only the last logit for lm_head when doing efficiency test.
+# !!! to do this, refer to the return value of LlamaModel_block_sparse_lut_forward function in MoA/models/llama/modeling_llama.py. The same can be done to LlamaModel.forward in the transformers library.
 # !!! also set PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True 
 
 logging.basicConfig(
@@ -48,7 +49,7 @@ parser.add_argument('--cuda_event', action='store_true')
 parser.add_argument('--cuda_cache', action="store_true")
 parser.add_argument('--record_memory', action='store_true')
 parser.add_argument('--memory_file_name', type=str, default=None)
-parser.add_argument('--test_mode', type=str, choices=['decode', 'prefill', 'whole'], default='prefill')
+parser.add_argument('--test_mode', type=str, choices=['decode', 'prefill', 'whole'], default='whole')
 
 args = parser.parse_args()
 

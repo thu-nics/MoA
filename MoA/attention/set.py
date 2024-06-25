@@ -15,7 +15,7 @@ def set_static_attention_lut(attention_lut_path_list: List[str], attention_lut_f
         attention_lut_path_list = [attention_lut_path_list]
 
     for lut_str in attention_lut_path_list:
-        print(f"{lut_str}: \n   attention density: {lut_attention_density(lut_str, block_size)[1]} \n   kv cache density: {lut_kv_cache_density(lut_str, block_size)[1]}")
+        print(f"{lut_str}: \n   attention density: {lut_attention_density(lut_str, block_size)[1]:.4f} \n   kv cache density: {lut_kv_cache_density(lut_str, block_size)[1]:.4f}")
 
     # load the attention mask from the file
     lut_list = [torch.load(attention_lut_path) for attention_lut_path in attention_lut_path_list]

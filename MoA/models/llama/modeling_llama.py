@@ -211,6 +211,8 @@ def LlamaModel_block_sparse_lut_forward(
     # ! you can pass only the hidden_states of last seq length for better performance
     return BaseModelOutputWithPast(
         last_hidden_state=hidden_states,
+        ## use this to past only the hidden_states of last seq length
+        # last_hidden_state=hidden_states[:, -1:, :], 
         past_key_values=next_cache,
         hidden_states=all_hidden_states,
         attentions=all_self_attns,
@@ -872,7 +874,7 @@ def LlamaDecoderLayer_set_static_attention_lut(self, lut_list, lut_for_head, blo
     if isinstance(lut_list, List) is False:
         lut_list = [lut_list]
 
-    print(f"permute head is set to {permute_head}")
+    # print(f"permute head is set to {permute_head}")
 
     # self.self_attn.efficient_attention = sparse_attention_prefill
     num_heads = lut_list[0].shape[0]
@@ -886,7 +888,8 @@ def LlamaDecoderLayer_set_static_attention_lut(self, lut_list, lut_for_head, blo
     if permute_head:
         # get a single permutation and a single cluster from lut_list
         permutation, cluster = lut_to_permutation(lut_list, num_heads)
-        print(len(cluster))
+        # print("The number of different rules per layer is ", len(cluster))
+        
         # assert cluster dictionary has only two records
         assert len(cluster) <= 2, f"to use permute head, you must have at most two patterns for the head, currently have {len(cluster)}"
         lut_list = [permute_lut(lut, permutation, num_heads) for lut in lut_list]

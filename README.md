@@ -1,21 +1,56 @@
 # MoA: Mixture of Sparse Attention for Automatic Large Language Model Compression
+**[[arXiv](https://arxiv.org/abs/2406.14909)]**
 
 ![intuition](assets/workflow.png)
 
-Mixture of Attention (MoA) overcomes the drawbacks of uniform sparse attention by searching heterogeneous elastic rules for each attention head using an automatic pipeline. 
+Compressing the attention operation is crucial for the efficiency of processing long inputs. Existing sparse attention methods (more specifically, local attention methods), such as StreamingLLM, adopt uniform and fixed attention masks across different attention heads. Nevertheless, some heads need to attend to more distant information than others; and as the input sequence gets longer, some heads might need to increase their span more than others. In this work, we propose MoA that overcomes the drawbacks of uniform sparse attention by searching heterogeneous elastic rules for each attention head using an automatic pipeline. 
 
 MoA achieves a $1.2-1.4\times$ GPU memory reduction and boosts the maximum decode throughput by $5.5-6.7 \times$ for 7B and 13B dense models on a single GPU, with minimal impact on performance.
 
+If you find this repository or paper useful, you can cite
+```
+@misc{fu2024moa,
+      title={MoA: Mixture of Sparse Attention for Automatic Large Language Model Compression}, 
+      author={Tianyu Fu and Haofeng Huang and Xuefei Ning and Genghan Zhang and Boju Chen and Tianqi Wu and Hongyi Wang and Zixiao Huang and Shiyao Li and Shengen Yan and Guohao Dai and Huazhong Yang and Yu Wang},
+      year={2024},
+      eprint={2406.14909},
+      archivePrefix={arXiv}
+}
+```
+
 ## Environment Setup
 
-First, create and activate the Conda environment using the following commands:
+First, create the Conda environment and install the relevant packages using the following commands:
 
 ```bash
-conda create -n moa python=3.10.13
+conda create -n moa python=3.10
 conda activate moa
-pip install -r requirement.txt
+
+pip install -r requirements.txt
 pip install -e .
 ```
+
+## Quick Start: Use Pre-defined Plans
+
+If you prefer not to perform the automatic compression plan search steps and want immediate results, we provide pre-compressed configurations for the `lmsys/vicuna-{size}-v1.5-16k` models (7B and 13B versions). These can be found in the `.pt` files under the `examples` directory.
+
+To download the example plans, ensure Git Large File Storage ([LFS](https://git-lfs.com/)) is installed to handle large files. You can install and set it up before cloning this repo. For linux users, do it with:
+
+```bash
+sudo apt-get install git-lfs
+git lfs install
+```
+
+Clone the repo using standard git commands. Git LFS will automatically download the large files. To skip downloading, use `--skip-lfs` option for `git clone`. 
+
+If the `.pt` files under `examples` folder are not automatically downloaded during cloning, retrieve them manually:
+
+```bash
+git lfs pull
+```
+
+After downloading the plan, you can directly go to `Evaluation` section to evaluate the model with the plans. 
+If you want to compress other models, you can follow the `Automatic Search Pipeline` section to compress the model by yourself.
 
 ## Automatic Search Pipeline
 
@@ -23,8 +58,8 @@ The pipeline automatically compresses the LLM, beginning with the creation of a 
 
 ### Calibration Dataset Generation
 
-MoA creates the calibration dataset with long dependency and model alignment. 
-This process involves querying an LLM with original questions to collect its responses, which are then formatted into a standard Hugging Face `Dataset` item.
+MoA creates the calibration dataset with long dependency and model alignment. We publish the calibration dataset at [this HuggingFace Repository](https://huggingface.co/datasets/nics-efc/MoA_Long_HumanQA) with human-written answers. To ensure "model alignment", we should generate the model answers from the original dense LLM.
+This involves querying an LLM with original questions to collect its responses, which are then formatted into a standard Hugging Face `Dataset` item.
 
 ```bash
 python scripts/pipeline/generate_calibration_dataset.py --model_path lmsys/vicuna-7b-v1.5-16k --model_name vicuna-7b-v1.5-16k --output_path_base local/dataset
@@ -71,6 +106,8 @@ Replace <plan_num> with the number of plans under the directory.
 
 ## Evaluation
 
+We provide the example compression plans under the `examples` directory. You can use them by setting the following `--lut_path` to the `.pt` files under the directory.
+
 ### Apply MoA to LLM
 
 Given the compression plan found by MoA, you can simply apply the plan to the model with few lines. 
@@ -107,6 +144,12 @@ MoA aims to preserve the retrieval ability of the original dense model with a re
 CUDA_VISIBLE_DEVICES=0 python scripts/pipeline/retrieval_evaluate.py --model_name lmsys/vicuna-7b-v1.5-16k --lut_path 7b/lut_result/lut_8192_plan_{i}.pt --output_dir 7b/retrieval_8k --length_level 8
 ```
 
+> Alternatively, you can use our example plans. When passing in multiple plans at different lengths, the correct length will be automatically selected according to the input length:
+> 
+> ```bash
+> CUDA_VISIBLE_DEVICES=0 python scripts/pipeline/retrieval_evaluate.py --model_name lmsys/vicuna-7b-v1.5-16k --lut_path examples/lmsys-vicuna-7b-v1.5-16k/lut_4096.pt examples/lmsys-vicuna-7b-v1.5-16k/lut_8192.pt examples/lmsys-vicuna-7b-v1.5-16k/lut_12288.pt examples/lmsys-vicuna-7b-v1.5-16k/lut_16384.pt --output_dir 7b/retrieval_8k --length_level 8
+> ```
+
 ### LongBench
 
 MoA strives to maintain the long-context understanding ability of the original dense model. To assess this capability using the [LongBench benchmark](https://github.com/THUDM/LongBench), execute the following command, substituting `{i}` with the actual plan ID:
@@ -120,3 +163,4 @@ CUDA_VISIBLE_DEVICES=0 python scripts/pipeline/longbench_evaluate.py --model_nam
 CUDA_VISIBLE_DEVICES=0 python scripts/pipeline/longbench_evaluate.py --model_name lmsys/vicuna-7b-v1.5-16k --max_length 15500 --eval longbench_fast --longbench_e --longbench_result_dir 7b/longbench_result --longbench_length_range 8k+ --use_lut --lut_path 7b/lut_result/lut_16384_plan_{i}.pt
 ```
 
+> Alternatively, you can use our example plans.
