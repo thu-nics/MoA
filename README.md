@@ -1,10 +1,19 @@
 # MoA: Mixture of Sparse Attention for Automatic Large Language Model Compression
 **[[arXiv](https://arxiv.org/abs/2406.14909)]** **[[project page](https://thu-nics.github.io/MoA_project_page/)]**
+<table width="100%">
+<tr>
+  <!-- Column for the image and text -->
+  <td width="60%" valign="top">
+    <img src="https://github.com/thu-nics/MoA_project_page/blob/master/static/images/workflow.png?raw=true" alt="Workflow Intuition" style="width:100%;">
+    <p>Compressing the attention operation is crucial for the efficiency of processing long inputs. Existing sparse attention methods (more specifically, local attention methods), such as StreamingLLM, adopt uniform and fixed attention masks across different attention heads. Nevertheless, some heads need to attend to more distant information than others; and as the input sequence gets longer, some heads might need to increase their span more than others. In this work, we propose MoA that overcomes the drawbacks of uniform sparse attention by searching heterogeneous elastic rules for each attention head using an automatic pipeline.</p>
+  </td>
 
-![intuition](assets/workflow.png)
-
-Compressing the attention operation is crucial for the efficiency of processing long inputs. Existing sparse attention methods (more specifically, local attention methods), such as StreamingLLM, adopt uniform and fixed attention masks across different attention heads. Nevertheless, some heads need to attend to more distant information than others; and as the input sequence gets longer, some heads might need to increase their span more than others. In this work, we propose MoA that overcomes the drawbacks of uniform sparse attention by searching heterogeneous elastic rules for each attention head using an automatic pipeline. 
-
+  <!-- Column for the GIF -->
+  <td width="40%" valign="top">
+    <img src="https://github.com/thu-nics/MoA_project_page/raw/master/static/images/moa_demo.gif" alt="MoA Demo" style="width:100%;">
+  </td>
+</tr>
+</table>
 MoA achieves a $1.2-1.4\times$ GPU memory reduction and boosts the maximum decode throughput by $5.5-6.7 \times$ for 7B and 13B dense models on a single GPU, with minimal impact on performance.
 
 If you find this repository or paper useful, you can cite
