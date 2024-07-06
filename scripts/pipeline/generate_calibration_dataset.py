@@ -83,7 +83,7 @@ if __name__ == "__main__":
     # generate answers by model
     if True:
         # multi_round_qa_dataset = load_from_disk(multi_round_qa_human_dataset_path)
-        multi_round_qa_dataset = load_dataset(huggingface_dataset_path)["train"].filter(lambda x: x["dataset"] == "multi_news")
+        multi_round_qa_dataset = load_dataset(huggingface_dataset_path)["train"].filter(lambda x: x["dataset"] == dataset_name_short)
         
         # filter to contain only length level <= 8
         multi_round_qa_dataset = multi_round_qa_dataset.filter(lambda x: x["total_length_level"] <= 8)
