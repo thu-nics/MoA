@@ -173,3 +173,21 @@ CUDA_VISIBLE_DEVICES=0 python scripts/evaluate/longbench_evaluate.py --model_nam
 ```
 
 > Alternatively, you can use our example plans.
+
+### Chat Demo
+
+To chat with the model using the example plans, run the following command:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python scripts/evaluate/chat_demo.py --model_name lmsys/vicuna-7b-v1.5-16k --lut_path examples/lmsys-vicuna-7b-v1.5-16k/lut_4096.pt examples/lmsys-vicuna-7b-v1.5-16k/lut_8192.pt examples/lmsys-vicuna-7b-v1.5-16k/lut_12288.pt examples/lmsys-vicuna-7b-v1.5-16k/lut_16384.pt --batch_size 16
+```
+
+> Currently, the input prompt should have at least 64 tokens.
+
+## TODOs
+
+> Due to padding issues in the prefill stage during batch inference, we temporarily switch to dense prefill in this repo for now. You can use sparse prefill without padding by modifying line 302 of `kernels/block_sparse_attention_lut.py`.
+
+- [ ] Support padding in batch inference
+
+- [ ] Further optimize kernel performance

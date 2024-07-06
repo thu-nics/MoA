@@ -290,7 +290,16 @@ class _sparse_attention(torch.autograd.Function):
 
         # prefill
         else:
-            return sparse_attention_prefill(q, k, v, sm_scale, lut, BLOCK_M, BLOCK_N)
+            return F.scaled_dot_product_attention(
+                query=q,
+                key=k,
+                value=v,
+                attn_mask=attention_mask,
+                dropout_p=attention_dropout,
+                is_causal=attention_mask is None and q_len > 1,
+                scale=sm_scale,
+            )
+            # return sparse_attention_prefill(q, k, v, sm_scale, lut, BLOCK_M, BLOCK_N)
 
 sparse_attention = _sparse_attention.apply
 
