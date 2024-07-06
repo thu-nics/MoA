@@ -26,8 +26,8 @@ from transformers.models.llama.modeling_llama import repeat_kv, apply_rotary_pos
 from types import MethodType
 
 from MoA.attention.convert import block_sparse_to_dense
-from .cache_utils import NewDynamicCache, CircularCache, StreamingllmDynamicCache
-from .permutation_utils import (
+from MoA.attention.cache_utils import NewDynamicCache, CircularCache, StreamingllmDynamicCache
+from MoA.attention.permutation_utils import (
     permute_attention_projection, 
     permute_output_projection, 
     permute_lut, 
@@ -36,7 +36,7 @@ from .permutation_utils import (
     get_lut_band_size,
 )
 
-from .density_calculation import streamingllm_attention_density, streamingllm_kv_cache_density
+from MoA.attention.density_calculation import streamingllm_attention_density, streamingllm_kv_cache_density
 
 logger = logging.get_logger(__name__)
 
@@ -133,7 +133,7 @@ def LlamaModel_block_sparse_lut_forward(
         # 2d mask is passed through the layers
         attention_mask = attention_mask if (attention_mask is not None and 0 in attention_mask) else None
     elif self._use_sdpa and not output_attentions:
-        raise NotImplementedError("sdpa is not supported in block sparse lut")
+        # raise NotImplementedError("sdpa is not supported in block sparse lut")
         # output_attentions=True can not be supported when using SDPA, and we fall back on
         # the manual implementation that requires a 4D causal mask in all cases.
         attention_mask = _prepare_4d_causal_attention_mask_for_sdpa(
@@ -944,6 +944,17 @@ def LlamaModel_use_block_sparse_attention_lut(self, permute_head=False, sparse_d
     if permute_head:
         self.forward = MethodType(LlamaModel_block_sparse_lut_forward, self)
     ### end of modification ###
+
+def LlamaModel_set_mixture_of_attention(self, alphas: List[List[int]], betas: List[List[float]], block_size: int, device: Optional[str] = None, permute_head=False, sparse_decode=False):
+    """
+    Set the mixture of attention of the model
+    """
+    self.moa = True
+    self.moa_config = {
+        'alphas': alphas,
+        'betas': betas,
+        'block_size': block_size,
+    }
 
 def create_streaming_attention_mask(token_len, global_size, band_size):
     # Start by creating an empty mask filled with False (0)
