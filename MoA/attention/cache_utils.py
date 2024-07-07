@@ -506,8 +506,6 @@ class CircularCache(Cache):
     def get_usable_length(self, new_seq_length: int, layer_idx: Optional[int] = 0) -> int:
         # return self.get_seq_length(layer_idx)
         raise NotImplementedError        
-    
-
 
 class StaticCircularCache(Cache):
     """
@@ -520,9 +518,9 @@ class StaticCircularCache(Cache):
     def __init__(
             self, 
             cache_size: List[List[int]],
+            batch_size: int = 1,
+            head_dim: int = 64,
             static_size: Optional[List[List[int]]] = None,
-            batch_size: Optional[int] = 1,
-            head_dim: Optional[int] = 64,
             dtype=None,
         ) -> None:
         """
@@ -557,17 +555,22 @@ class StaticCircularCache(Cache):
 
         self.total_cache_size: List[int] = [sum(this_cache_size) for this_cache_size in cache_size] # total cache size for each layer
         head_start_index = [[] for layer_id in range(self.num_layers)] # the starting index of each head in each layer
+        head_end_index = [[] for layer_id in range(self.num_layers)] # the ending index of each head in each layer
         for layer_id in range(self.num_layers):
             for head_id in range(len(cache_size[layer_id])):
                 if head_id == 0:
                     head_start_index[layer_id].append(0)
                 else:
                     head_start_index[layer_id].append(head_start_index[layer_id][-1] + cache_size[layer_id][head_id-1])
-        self.cache_head_index = [torch.tensor(head_start_index[layer_id], dtype=int) for layer_id in range(self.num_layers)]    
+                head_end_index[layer_id].append(head_start_index[layer_id][head_id] + cache_size[layer_id][head_id])
+
+        self.cache_head_start_index = [torch.tensor(head_start_index[layer_id], dtype=int) for layer_id in range(self.num_layers)]    
+        self.cache_head_end_index = [torch.tensor(head_end_index[layer_id], dtype=int) for layer_id in range(self.num_layers)]
 
         self.circular_cache_head_index: List[torch.tensor] = [torch.tensor([head_start_index[layer_id][head_id]+static_size[layer_id][head_id] for head_id in range(self.num_head_for_each_layer[layer_id])]) for layer_id in range(self.num_layers)] # the starting index of the circular part of each head in each layer
         
-        self._update_index: List[torch.Tensor] = [torch.tensor([head_start_index[layer_id][head_id]+static_size[layer_id][head_id] for head_id in range(self.num_head_for_each_layer[layer_id])]) for layer_id in range(self.num_layers)] # initialize the update index to the beginning of the circular part
+        # self._update_index: List[torch.Tensor] = [torch.tensor([head_start_index[layer_id][head_id]+static_size[layer_id][head_id] for head_id in range(self.num_head_for_each_layer[layer_id])]) for layer_id in range(self.num_layers)] # initialize the update index to the beginning of the circular part
+        self._update_index: List[torch.Tensor] = [torch.tensor(head_start_index[layer_id], dtype=int) for layer_id in range(self.num_layers)] # initialize the update index to the beginning of the cache, it will later circulate within the circular part after filling the cache
 
         self._seen_tokens = 0  # Used in `generate` to keep tally of how many tokens the cache has seen
         self._kv_len = [0 for _ in range(self.num_layers)] # the length of the key and value cache for each layer
@@ -604,6 +607,7 @@ class StaticCircularCache(Cache):
         key_states: torch.Tensor,
         value_states: torch.Tensor,
         layer_idx: int,
+        # position_ids: torch.Tensor, # can be used to move the sink part to the left side
         cache_kwargs: Optional[Dict[str, Any]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -618,6 +622,9 @@ class StaticCircularCache(Cache):
         assert layer_idx < self.num_layers
         assert key_states.shape[1] == self.num_head_for_each_layer[layer_idx]
 
+        # TODO: move the sink part to the left side
+        # padding - sink - circular 
+
         # Update the number of seen tokens
         batch_size = key_states.shape[0]
         seq_len = key_states[0].shape[-2]
@@ -625,19 +632,30 @@ class StaticCircularCache(Cache):
         if layer_idx == 0:
             self._seen_tokens += seq_len
 
-        self._kv_len[layer_idx] += seq_len
-        
         # calculate the update index of the cache
-        update_index = ((torch.stack([self._update_index[layer_idx] + i for i in range(seq_len+1)], dim=0) - self.circular_cache_head_index[layer_idx]) % self.circular_cache_size[layer_idx]) + self.circular_cache_head_index[layer_idx] # shape: (seq_len+1, num_heads)
+        update_index_circular = ((torch.stack([self._update_index[layer_idx] + i for i in range(seq_len+1)], dim=0) - self.circular_cache_head_index[layer_idx]) % self.circular_cache_size[layer_idx]) + self.circular_cache_head_index[layer_idx] # shape: (seq_len+1, num_heads), ending at _kv_len > static_len
+        update_index_static = torch.stack([self._update_index[layer_idx] + i for i in range(seq_len+1)], dim=0) # shape: (seq_len+1, num_heads), ending at _kv_len <= static_len
+        update_index = torch.where(self._kv_len[layer_idx] + torch.arange(0, seq_len+1).reshape(-1,1).expand(-1, num_head) > self.static_cache_size[layer_idx], update_index_circular, update_index_static) # shape: (seq_len+1, num_heads)
+
+        self._kv_len[layer_idx] += seq_len
 
         self._update_index[layer_idx] = update_index[-1, :] # the starting point for next update
-        update_index = update_index[:seq_len, :] # shape: (seq_len, num_heads)
+        update_index = update_index[:seq_len, :].permute(1, 0) # shape: (num_heads, seq_len)
 
-        update_index = update_index.permute(1, 0).reshape(-1).unsqueeze(0).unsqueeze(-1).expand(batch_size, -1, head_dim) # shape: [batch_size, num_heads * seq_len, head_dim]
+        # If the seq_len is so long that it > cache size, will cause scatter error (ideally, only the latter indexed key/value should be reserved)
+        # keep the index where 1. the seq_len is less than the cache size or 2. index within static cache
+        valid_index_map = (torch.arange(seq_len, 0, -1, device=key_states.device).unsqueeze(0).expand(num_head, -1) <= self.circular_cache_size[layer_idx].reshape(-1,1)) | (update_index < self.circular_cache_head_index[layer_idx].reshape(-1, 1)) # shape (num_heads, seq_len)
+    
+        valid_update_index = update_index[valid_index_map] # shape: (num_heads * seq_len)
+        
+        valid_key_states = key_states.reshape(batch_size, -1, head_dim)[:, valid_index_map.reshape(-1), :] # shape (batch_size, num_heads * seq_len, head_dim)
+        valid_value_states = value_states.reshape(batch_size, -1, head_dim)[:, valid_index_map.reshape(-1), :] # shape (batch_size, num_heads * seq_len, head_dim)
+        
+        valid_update_index = valid_update_index.unsqueeze(0).unsqueeze(-1).expand(batch_size, -1, head_dim) # shape: [batch_size, num_heads * seq_len, head_dim]
 
         # assign the new key_states and value_states to the cache by the update_index
-        self.key_cache[layer_idx] = torch.scatter(self.key_cache[layer_idx], -2, update_index, key_states.reshape(batch_size, -1, head_dim))
-        self.value_cache[layer_idx] = torch.scatter(self.value_cache[layer_idx], -2, update_index, value_states.reshape(batch_size, -1, head_dim))
+        self.key_cache[layer_idx] = torch.scatter(self.key_cache[layer_idx], -2, valid_update_index, valid_key_states)
+        self.value_cache[layer_idx] = torch.scatter(self.value_cache[layer_idx], -2, valid_update_index, valid_value_states)
 
         return self.key_cache[layer_idx], self.value_cache[layer_idx]
 
@@ -657,10 +675,45 @@ class StaticCircularCache(Cache):
         """Reorders the cache for beam search, given the selected beam indices."""
         raise NotImplementedError("Reordering the cache is not implemented currently!")
 
-    def get_usable_length(self, new_seq_length: int, layer_idx: Optional[int] = 0) -> int:
-        # return self.get_seq_length(layer_idx)
-        raise NotImplementedError        
 
+def moa_config_to_cache_config(
+        moa_config,
+        seq_len,
+        max_new_token: int = 1024,
+        sink_size: int = 64,
+        minimum_cache_size: int = 128,
+    ):
+    """
+    Convert the MoA configuration to the cache configuration
+    
+    Parameters:
+        moa_config (`Dict`):
+            The MoA configuration.
+    
+    Return:
+        A dictionary containing the cache configuration.
+    """
+    cache_size_dict = []
+    static_size_dict = []
+
+    alphas = moa_config["alphas"]
+    betas = moa_config["betas"]
+    
+    for layer_id in range(len(alphas)):
+        cache_size_this_layer = []
+        static_size_this_layer = []
+        for head_id in range(len(alphas[layer_id])):
+            cache_size_this_head = int(alphas[layer_id][head_id] + (seq_len+max_new_token) * betas[layer_id][head_id])
+            cache_size_this_head = max(cache_size_this_head, minimum_cache_size)
+            cache_size_this_layer.append(cache_size_this_head)
+            static_size_this_layer.append(min(cache_size_this_head, sink_size))
+        cache_size_dict.append(cache_size_this_layer)
+        static_size_dict.append(static_size_this_layer)
+
+    return {
+        "cache_size": cache_size_dict,
+        "static_size": static_size_dict,
+    }
 
 if __name__ == "__main__":
     batch_size = 2
@@ -675,15 +728,18 @@ if __name__ == "__main__":
         dtype=torch.float16,
     )
 
+    acc = 0
     for step in range(0, 10):
-        seq_len = 3
+        seq_len = 7
 
-        key_states = torch.randn(batch_size, num_head, seq_len, head_dim, dtype=torch.float16)
-        value_states = torch.randn(batch_size, num_head, seq_len, head_dim, dtype=torch.float16)
+        key_states = torch.arange(acc, batch_size * num_head * seq_len * head_dim + acc, dtype=torch.float16).reshape(batch_size, num_head, seq_len, head_dim)
+        value_states = torch.arange(acc, batch_size * num_head * seq_len * head_dim + acc, dtype=torch.float16).reshape(batch_size, num_head, seq_len, head_dim)
+
+        acc += batch_size * num_head * seq_len * head_dim
 
         key_cache_new, value_cache_new = cache.update(key_states, value_states, 0)
 
-        list_key_cache_new = cache._cache_uncontigious(key_cache_new, cache.cache_head_index[0], cache.cache_size[0])
+        list_key_cache_new = cache._cache_uncontigious(key_cache_new, cache.cache_head_start_index[0], cache.cache_size[0])
 
         # batch = 1
         print(key_states[1])
@@ -691,3 +747,5 @@ if __name__ == "__main__":
         print(list_key_cache_new[1][1]) # head 1, total size 10, static size 3
 
         print("done")
+
+
