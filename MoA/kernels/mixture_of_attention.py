@@ -9,9 +9,11 @@ import torch
 from torch import Tensor
 from torch import nn
 import torch.nn.functional as F
+from transformers.modeling_attn_mask_utils import _prepare_4d_causal_attention_mask_for_sdpa
 import math
 import triton
 import triton.language as tl
+
 from MoA.attention.cache_utils import StaticCircularCache
 
 class _mixture_of_sparse_attention(torch.autograd.Function):
@@ -52,8 +54,7 @@ class _mixture_of_sparse_attention(torch.autograd.Function):
             # split group and calculate for now
             k = StaticCircularCache.to_group_contigious(k, head_index)
             v = StaticCircularCache.to_group_contigious(v, head_index)
-
-            attention_mask = None # noqa: only used for debug purpose
+            attention_mask = StaticCircularCache.to_group_contigious(attention_mask, head_index)
 
             num_group = len(k)
             if num_group > 2:
@@ -68,12 +69,20 @@ class _mixture_of_sparse_attention(torch.autograd.Function):
                 this_q = q[:, start_index:end_index, :, :]
                 this_k = k[group_id]
                 this_v = v[group_id]
+                this_attention_mask = attention_mask[group_id][:, 0, :] # attention masks are the same within each group
+
+                this_attention_mask = _prepare_4d_causal_attention_mask_for_sdpa(
+                    this_attention_mask,
+                    (bsz, q_len),
+                    q,
+                    past_key_values_length=cache_size - q_len,
+                )
 
                 this_attn_output = F.scaled_dot_product_attention(
                     this_q,
                     this_k,
                     this_v,
-                    attention_mask,
+                    this_attention_mask,
                     attention_dropout,
                     is_causal=attention_mask is None and q_len > 1,
                     scale=sm_scale,
@@ -92,6 +101,13 @@ class _mixture_of_sparse_attention(torch.autograd.Function):
             Lq, Lk, Lv = q.shape[-1], k.shape[-1], v.shape[-1]
             assert Lq == Lk and Lk == Lv
             kv_seq_len = k.size(2)
+
+            attention_mask = _prepare_4d_causal_attention_mask_for_sdpa(
+                attention_mask,
+                (bsz, q_len),
+                q,
+                past_key_values_length=kv_seq_len - q_len,
+            )
 
             return F.scaled_dot_product_attention(
                 query=q,

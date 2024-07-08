@@ -119,31 +119,13 @@ def LlamaModel_MixtureAttention_forward(
     if inputs_embeds is None:
         inputs_embeds = self.embed_tokens(input_ids)
 
-    if self._use_flash_attention_2:
-        raise NotImplementedError("flash attention 2 is not supported in block sparse lut")
-        # 2d mask is passed through the layers
-        attention_mask = attention_mask if (attention_mask is not None and 0 in attention_mask) else None
-    elif self._use_sdpa and not output_attentions:
-        # raise NotImplementedError("sdpa is not supported in block sparse lut")
-        # output_attentions=True can not be supported when using SDPA, and we fall back on
-        # the manual implementation that requires a 4D causal mask in all cases.
-        attention_mask = _prepare_4d_causal_attention_mask_for_sdpa(
-            attention_mask,
-            (batch_size, seq_length),
-            inputs_embeds,
-            past_key_values_length,
-        )
-    else:
-        #! you can disable this part for better performance
-        # 4d mask is passed through the layers
-        attention_mask = _prepare_4d_causal_attention_mask(
-            attention_mask, (batch_size, seq_length), inputs_embeds, past_key_values_length
-        )
-
-    # embed positions
-    hidden_states = inputs_embeds
 
     ### modification ###
+    attention_mask = attention_mask if (attention_mask is not None and 0 in attention_mask) else None # same as flash_attention2
+    if output_attentions:
+        raise NotImplementedError("output_attentions is not supported in mixture of attention")
+    # embed positions
+    hidden_states = inputs_embeds
     inputs_embeds = None
     ### end of modification ###
 
@@ -212,13 +194,12 @@ def LlamaModel_MixtureAttention_forward(
 
 
 class LlamaMixtureAttention(LlamaAttention):
-
     def forward(
             self,
             hidden_states: torch.Tensor,
-            attention_mask: Optional[torch.Tensor] = None,
+            attention_mask: Optional[torch.LongTensor] = None,
             position_ids: Optional[torch.LongTensor] = None,
-            past_key_value: Optional[Cache] = None,
+            past_key_value: Optional[StaticCircularCache] = None,
             output_attentions: bool = False,
             use_cache: bool = False,
             **kwargs,
@@ -248,15 +229,27 @@ class LlamaMixtureAttention(LlamaAttention):
 
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
 
+        ### begin modification ###
+        if attention_mask is not None:
+            if attention_mask.size() != (bsz, kv_seq_len):
+                raise ValueError(
+                    f"Attention mask should be of size {(bsz, kv_seq_len)}, but is {attention_mask.size()}"
+                )
+
         if past_key_value is not None:
             cache_kwargs = {"sin": sin, "cos": cos}  # Specific to RoPE models
-            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, attention_mask, cache_kwargs)
+            if q_len == 1 and kv_seq_len > 1:
+                # update this_attention_mask during decode
+                this_attention_mask = past_key_value.mask_cache[self.layer_idx]
+            else:
+                # TODO: support prefill with KV-cache
+                this_attention_mask = attention_mask
+        else:
+            this_attention_mask = attention_mask
+        ### end of modification ###
 
-        if attention_mask is not None:
-            if attention_mask.size() != (bsz, 1, q_len, kv_seq_len):
-                raise ValueError(
-                    f"Attention mask should be of size {(bsz, 1, q_len, kv_seq_len)}, but is {attention_mask.size()}"
-                )
+
 
         ### begin modification ###
         # the key and value states before past_key_value.update are tensors of shape (bsz, num_heads, q_len, head_dim); after updating:
@@ -286,7 +279,7 @@ class LlamaMixtureAttention(LlamaAttention):
             value_states,
             sm_scale=self.head_dim ** -0.5,
             head_index=head_index,
-            attention_mask=attention_mask,
+            attention_mask=this_attention_mask,
             attention_dropout=0.0,
         )
         ### end modification ###
