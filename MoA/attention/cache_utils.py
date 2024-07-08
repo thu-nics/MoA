@@ -1,6 +1,7 @@
 from transformers.cache_utils import Cache
 from transformers.cache_utils import DynamicCache as OriginalCache
 from typing import Any, Dict, List, Optional, Tuple
+import pandas as pd
 import torch
 
 class NewDynamicCache(Cache):
@@ -539,7 +540,6 @@ class StaticCircularCache(Cache):
         """
         self.dtype = dtype if dtype is not None else torch.float32
         self.device=device
-        
 
         # initialize the cache sizes and indices
         self.num_layers = len(cache_size)
@@ -572,7 +572,7 @@ class StaticCircularCache(Cache):
         assert len(static_size) == self.num_layers
         for layer_id in range(self.num_layers):
             assert len(static_size[layer_id]) == len(cache_size[layer_id])
-        
+
         # initialize the cache
         self.seen_tokens = 0  # Used in `generate` to keep tally of how many tokens the cache has seen
         self._kv_len = [0 for _ in range(self.num_layers)] # the length of the key and value cache for each layer
@@ -620,37 +620,37 @@ class StaticCircularCache(Cache):
         """
         groups = []
         batch_size, _, head_dim = tensor.shape
-        
+
         cache_size = head_index[1:] - head_index[:-1] # shape: (num_heads)
 
         # Identify unique consecutive cache sizes and their boundaries
         unique_sizes, inverse_indices, counts = torch.unique_consecutive(cache_size, return_inverse=True, return_counts=True)
-        
+
         # Prepare to group
         current_idx = 0
         for size, count in zip(unique_sizes, counts):
             # Start and end indices in head_start_index
             group_start_index = current_idx
             group_end_index = group_start_index + count
-            
+
             # Slicing tensor according to the computed start and end
             start = head_index[group_start_index].item()
             end = head_index[group_end_index - 1].item() + size.item()
-            
+
             # Extract the relevant slice from the tensor
             group_tensor = tensor[:, start:end, :]
-            
+
             # Reshape to add the head dimension: [batch_size, num_heads_in_group, cache_size_of_head, head_dim]
             group_tensor = group_tensor.view(batch_size, count, size.item(), head_dim).contiguous()
-            
+
             # Append to groups
             groups.append(group_tensor)
-            
+
             # Update the current index
             current_idx = group_end_index
-        
+
         return groups
-    
+
     def update(
         self,
         key_states: torch.Tensor,
@@ -672,7 +672,7 @@ class StaticCircularCache(Cache):
         assert key_states.shape[1] == self.num_head_for_each_layer[layer_idx]
 
         # TODO: move the sink part to the left side
-        # padding - sink - circular 
+        # padding - sink - circular
 
         # Update the number of seen tokens
         batch_size = key_states.shape[0]
@@ -695,12 +695,12 @@ class StaticCircularCache(Cache):
         # If the seq_len is so long that it > cache size, will cause scatter error (ideally, only the latter indexed key/value should be reserved)
         # keep the index where 1. the seq_len is less than the cache size or 2. index within static cache
         valid_index_map = (torch.arange(seq_len, 0, -1, device=self.device).unsqueeze(0).expand(num_head, -1) <= self.circular_cache_size[layer_idx].reshape(-1,1)) | (update_index < self.circular_cache_head_index[layer_idx].reshape(-1, 1)) # shape (num_heads, seq_len)
-    
+
         valid_update_index = update_index[valid_index_map] # shape: (num_heads * seq_len)
-        
+
         valid_key_states = key_states.reshape(batch_size, -1, head_dim)[:, valid_index_map.reshape(-1), :] # shape (batch_size, num_heads * seq_len, head_dim)
         valid_value_states = value_states.reshape(batch_size, -1, head_dim)[:, valid_index_map.reshape(-1), :] # shape (batch_size, num_heads * seq_len, head_dim)
-        
+
         valid_update_index = valid_update_index.unsqueeze(0).unsqueeze(-1).expand(batch_size, -1, head_dim) # shape: [batch_size, num_heads * seq_len, head_dim]
 
         # assign the new key_states and value_states to the cache by the update_index
@@ -716,8 +716,6 @@ class StaticCircularCache(Cache):
             # prefill
             # TODO: for multi-round conversation, how to deal with the caches from the previous rounds whose lengths are different. Ignoring all history for now
             return key_states, value_states 
-       
-        
 
     def __len__(self):
         return len(self.key_cache)
@@ -726,31 +724,42 @@ class StaticCircularCache(Cache):
         """Returns the sequence length of the cached states. A layer index can be optionally passed."""
         # ! warning: this function is meaningless, just a place holder
         return self._kv_len[layer_idx]
-    
+
     def get_max_length(self) -> Optional[int]:
         """Returns the maximum sequence length of the cached states. This Cache does not have a maximum length."""
         return None
-    
+
     def reorder_cache(self, beam_idx: torch.LongTensor):
         """Reorders the cache for beam search, given the selected beam indices."""
         raise NotImplementedError("Reordering the cache is not implemented currently!")
 
 
 def moa_config_to_cache_config(
-        moa_config,
-        seq_len,
-        max_new_token: int = 1024,
-        sink_size: int = 64,
-        minimum_cache_size: int = 128,
-    ):
+    moa_config,
+    seq_len,
+    max_new_token: int = 1024,
+    sink_size: int = 64,
+    minimum_cache_size: int = 128,
+    verbose: bool = True,
+):
     """
     Convert the MoA configuration to the cache configuration
-    
+
     Parameters:
         moa_config (`Dict`):
             The MoA configuration.
-    
-    Return:
+        seq_len (int):
+            The sequence length.
+        max_new_token (int, optional):
+            The maximum number of new tokens. Defaults to 1024.
+        sink_size (int, optional):
+            The sink size. Defaults to 64.
+        minimum_cache_size (int, optional):
+            The minimum cache size. Defaults to 128.
+        verbose (bool, optional):
+            Whether to print the cache configuration summary. Defaults to True.
+
+    Returns:
         A dictionary containing the cache configuration.
     """
     cache_size_dict = []
@@ -758,17 +767,77 @@ def moa_config_to_cache_config(
 
     alphas = moa_config["alphas"]
     betas = moa_config["betas"]
-    
+
     for layer_id in range(len(alphas)):
         cache_size_this_layer = []
         static_size_this_layer = []
         for head_id in range(len(alphas[layer_id])):
-            cache_size_this_head = int(alphas[layer_id][head_id] + (seq_len+max_new_token) * betas[layer_id][head_id])
+            cache_size_this_head = int(
+                alphas[layer_id][head_id]
+                + (seq_len + max_new_token) * betas[layer_id][head_id]
+            )
             cache_size_this_head = max(cache_size_this_head, minimum_cache_size)
             cache_size_this_layer.append(cache_size_this_head)
             static_size_this_layer.append(min(cache_size_this_head, sink_size))
         cache_size_dict.append(cache_size_this_layer)
         static_size_dict.append(static_size_this_layer)
+
+    if verbose:
+        print("Cache configuration")
+        summary = []
+        for layer_id in range(len(alphas)):
+            for head_id in range(len(alphas[layer_id])):
+                summary.append(
+                    {
+                        "layer_id": layer_id,
+                        "head_id": head_id,
+                        "raw_cache_size": seq_len,
+                        "cache_size": cache_size_dict[layer_id][head_id],
+                        "static_size": static_size_dict[layer_id][head_id],
+                        "circular_size": cache_size_dict[layer_id][head_id]
+                        - static_size_dict[layer_id][head_id],
+                        "ratio": cache_size_dict[layer_id][head_id] / seq_len,
+                    }
+                )
+        summary = pd.DataFrame(summary)
+        pd.options.display.float_format = "{:.2f}".format  # keep two digits for all values during printing
+        
+        # reduce the summary for each layer
+        layer_summary = (
+            summary.groupby("layer_id")
+            .agg(
+                {
+                    "raw_cache_size": ["mean", "min", "max"],
+                    "cache_size": ["mean", "min", "max"],
+                    "static_size": ["mean", "min", "max"],
+                    "circular_size": ["mean", "min", "max"],
+                    "ratio": ["mean", "min", "max"],
+                }
+            )
+            .reset_index()
+        )
+        print(layer_summary)
+        # reduce the summary for the whole model
+        model_summary = layer_summary.agg(
+            {
+                ("raw_cache_size", "mean"): "mean",
+                ("raw_cache_size", "min"): "min",
+                ("raw_cache_size", "max"): "max",
+                ("cache_size", "mean"): "mean",
+                ("cache_size", "min"): "min",
+                ("cache_size", "max"): "max",
+                ("static_size", "mean"): "mean",
+                ("static_size", "min"): "min",
+                ("static_size", "max"): "max",
+                ("circular_size", "mean"): "mean",
+                ("circular_size", "min"): "min",
+                ("circular_size", "max"): "max",
+                ("ratio", "mean"): "mean",
+                ("ratio", "min"): "min",
+                ("ratio", "max"): "max",
+            }
+        ).to_frame().T.reset_index(drop=True)
+        print(model_summary)
 
     return {
         "cache_size": cache_size_dict,
@@ -810,5 +879,3 @@ if __name__ == "__main__":
         print(list_key_cache_new[0][1]) # head 0, total size 5, static size 2
         print(list_key_cache_new[1][1]) # head 1, total size 10, static size 3
         print("done")
-
-

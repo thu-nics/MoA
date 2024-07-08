@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
-
-from typing import Optional
+from typing import List, Optional, Dict, Tuple
 
 def permute_attention_projection(
     layer: nn.Linear, 
@@ -119,13 +118,22 @@ def permute_lut(
 
 
 def lut_to_permutation(
-    lut_list: torch.Tensor,
+    lut_list: List[torch.Tensor],
     num_heads: int = 32,
     num_key_value_groups: int = 1,
 ):
     '''
-    find a permutation, such that after applying the permutation, same heads clustered together
-    also return the clustered index
+    Find a permutation, such that after applying the permutation, the heads with same hyperparameters are clustered together
+
+    Parameters:
+        lut_list: (`List[torch.Tensor]`):
+            A list of lut table
+    
+    Return:
+        Permutation: (`torch.Tensor`):
+            A 1D Tensor of shape `(num_heads,)` representing the original index of the heads before permutation
+        Cluster: (`Dict[int, Tuple[int, int]]`):
+            A dictionary of the form `{cluster_index: (start, end)}` where `start` and `end` are the range of the cluster after permutation
     '''
 
     assert lut_list[0].shape[0] == num_heads
@@ -208,6 +216,57 @@ def lut_to_permutation(
     # return any of the two pattern stuff    
     return torch.tensor(sorted_indices_list[two_pattern_idx[0]]), cluster_list[two_pattern_idx[0]]
     
+def moa_config_to_permutation(moa_config) -> Tuple[List[torch.Tensor], List[Dict[int, Tuple[int, int]]]]:
+    '''
+    Find a permutation, such that after applying the permutation, the heads with same hyperparameters are clustered together
+
+    Parameters:
+        moa_config: (`Dict`):
+            A dictionary containing the MoA config. Two keys are used:
+                'alphas': (`Union[List[torch.Tensor], List[List[int]]]`): A list of alpha values for each layer
+                'betas': (`Union[List[torch.Tensor], List[List[int]]]`): A list of beta values for each layer
+    
+    Return:
+        Permutation: (`List[torch.Tensor]`):
+            Each element the permutation of a layer. Each element is a 1D Tensor of shape `(num_heads,)` representing the original index of the heads before permutation
+        Cluster: (`List[Dict[int, Tuple[int, int]]]`):
+            Each element is a dictionary of the form `{cluster_index: (start, end)}` where `start` and `end` are the range of the cluster after permutation
+    '''
+    
+    permutations = []
+    clusters = []
+    
+    # Iterate over each layer
+    for layer_index, (layer_alphas, layer_betas) in enumerate(zip(moa_config['alphas'], moa_config['betas'])):
+        num_heads = len(layer_alphas)
+        
+        # Pair each alpha and beta with its index
+        combined = list(zip(layer_alphas, layer_betas, range(num_heads)))
+        
+        # Sort based on alpha and beta values
+        sorted_combined = sorted(combined, key=lambda x: (x[0], x[1]))
+        
+        # Extract the sorted indices
+        sorted_indices = [x[2] for x in sorted_combined]
+        
+        # Create permutation tensor
+        permutation_tensor = torch.tensor(sorted_indices)
+        permutations.append(permutation_tensor)
+        
+        # Track clusters
+        cluster_dict = {}
+        current_start = 0
+        
+        # Iterate through sorted heads to determine clusters
+        for i in range(1, num_heads):
+            if sorted_combined[i-1][:2] != sorted_combined[i][:2]:  # Check if current and previous differ
+                cluster_dict[len(cluster_dict)] = (current_start, i - 1)
+                current_start = i
+        cluster_dict[len(cluster_dict)] = (current_start, num_heads - 1)  # Last cluster
+        
+        clusters.append(cluster_dict)
+    
+    return permutations, clusters
 
 
 def lut_to_permutation_single_layer(
