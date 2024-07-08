@@ -579,6 +579,7 @@ class StaticCircularCache(Cache):
 
         self.key_cache: List[torch.Tensor] = [torch.zeros(batch_size, total_cache_size_this, head_dim, dtype=self.dtype, device=device) for total_cache_size_this in self.total_cache_size]
         self.value_cache: List[torch.Tensor] = [torch.zeros(batch_size, total_cache_size_this, head_dim, dtype=self.dtype, device=device) for total_cache_size_this in self.total_cache_size]
+        self.mask_cache: List[torch.Tensor] = [torch.zeros(batch_size, total_cache_size_this, dtype=torch.int64, device=device) for total_cache_size_this in self.total_cache_size] # 1 means not masked, 0 means masked
 
     @staticmethod
     def to_uncontigious(
@@ -605,23 +606,27 @@ class StaticCircularCache(Cache):
         head_index: torch.Tensor, 
     ) -> List[torch.Tensor]:
         """
-        Split the tensor to each group, where heads within the group share the same cache size. 
+        Split the tensor into each group, where heads within the group share the same cache size. 
 
         Parameters:
             tensor (`torch.Tensor`):
-                The expected shape for each tensor is `[batch_size, \sum_h^H cache_size_of_head_h , head_dim]`.
-            head_start_index (`torch.Tensor`):
+                The expected shape for each tensor is either `[batch_size, \sum_h^H cache_size_of_head_h, head_dim]` 
+                or `[batch_size, \sum_h^H cache_size_of_head_h]`.
+            head_index (`torch.Tensor`):
                 The starting index of each head, shape (num_heads+1).
-            cache_size (`torch.Tensor`):
-                The total cache size for each head.
-        
+
         Return:
-            A list of tensors, each tensor is the cache for each group of shape `[batch_size, num_head_of_group, cache_size_of_head_h, head_dim]`.
+            A list of tensors, each tensor is the cache for each group. The shape of each tensor will be
+            `[batch_size, num_heads_in_group, cache_size_of_head, head_dim]` if head_dim is present, 
+            otherwise `[batch_size, num_heads_in_group, cache_size_of_head]`.
         """
         groups = []
-        batch_size, _, head_dim = tensor.shape
+        batch_size = tensor.shape[0]
+        has_head_dim = len(tensor.shape) == 3
+        if has_head_dim:
+            head_dim = tensor.shape[2]
 
-        cache_size = head_index[1:] - head_index[:-1] # shape: (num_heads)
+        cache_size = head_index[1:] - head_index[:-1]  # shape: (num_heads)
 
         # Identify unique consecutive cache sizes and their boundaries
         unique_sizes, inverse_indices, counts = torch.unique_consecutive(cache_size, return_inverse=True, return_counts=True)
@@ -629,7 +634,7 @@ class StaticCircularCache(Cache):
         # Prepare to group
         current_idx = 0
         for size, count in zip(unique_sizes, counts):
-            # Start and end indices in head_start_index
+            # Start and end indices in head_index
             group_start_index = current_idx
             group_end_index = group_start_index + count
 
@@ -638,18 +643,23 @@ class StaticCircularCache(Cache):
             end = head_index[group_end_index - 1].item() + size.item()
 
             # Extract the relevant slice from the tensor
-            group_tensor = tensor[:, start:end, :]
-
-            # Reshape to add the head dimension: [batch_size, num_heads_in_group, cache_size_of_head, head_dim]
-            group_tensor = group_tensor.view(batch_size, count, size.item(), head_dim).contiguous()
+            if has_head_dim:
+                group_tensor = tensor[:, start:end, :]
+                # Reshape to add the head dimension: [batch_size, num_heads_in_group, cache_size_of_head, head_dim]
+                group_tensor = group_tensor.view(batch_size, count, size.item(), head_dim)
+            else:
+                group_tensor = tensor[:, start:end]
+                # Reshape to add the head dimension: [batch_size, num_heads_in_group, cache_size_of_head]
+                group_tensor = group_tensor.view(batch_size, count, size.item())
 
             # Append to groups
-            groups.append(group_tensor)
+            groups.append(group_tensor.contiguous())
 
             # Update the current index
             current_idx = group_end_index
 
         return groups
+
 
     def update(
         self,
@@ -657,6 +667,7 @@ class StaticCircularCache(Cache):
         value_states: torch.Tensor,
         layer_idx: int,
         # position_ids: torch.Tensor, # can be used to move the sink part to the left side
+        attention_mask: Optional[torch.BoolTensor] = None,
         cache_kwargs: Optional[Dict[str, Any]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -664,7 +675,15 @@ class StaticCircularCache(Cache):
             key_states (`torch.Tensor`):
                 The expected shapes for each key_states or value_states are
                     `[batch_size, num_heads, seq_len, head_dim]`.
-
+            value_states (`torch.Tensor`):
+                The expected shapes for each key_states or value_states are
+                    `[batch_size, num_heads, seq_len, head_dim]`.
+            layer_idx (`int`):
+                The index of the layer to cache the states for.
+            attention_mask (`torch.BoolTensor`, `optional`):
+                The attention mask to apply to the cache. If not provided, no mask will be applied. The mask is a int64 tensor, where 1 means preverse the value and 0 means masked. The expected shape is `[batch_size, seq_len]`.
+            cache_kwargs (`Dict[str, Any]`, `optional`):
+                Additional arguments for the cache subclass. No additional arguments are used in `StaticCircularCache`.
         Return:
             A tuple containing the updated key and value states. The expected shapes for each key_states or value_states are `[batch_size, \sum_h^H cache_size_of_head_h , head_dim]`.
         """
@@ -701,7 +720,17 @@ class StaticCircularCache(Cache):
         valid_key_states = key_states.reshape(batch_size, -1, head_dim)[:, valid_index_map.reshape(-1), :] # shape (batch_size, num_heads * seq_len, head_dim)
         valid_value_states = value_states.reshape(batch_size, -1, head_dim)[:, valid_index_map.reshape(-1), :] # shape (batch_size, num_heads * seq_len, head_dim)
 
-        valid_update_index = valid_update_index.unsqueeze(0).unsqueeze(-1).expand(batch_size, -1, head_dim) # shape: [batch_size, num_heads * seq_len, head_dim]
+        valid_update_index = valid_update_index.unsqueeze(0).expand(batch_size, -1) # shape: [batch_size, num_heads * seq_len]
+
+        # assign the attention mask to the cache if provided
+        if attention_mask is not None:
+            assert len(attention_mask.shape) == 2, "The shape of the attention mask should be [batch_size, kv_len] and the dtype should be torch.int64."
+            # attention_mask shape is (batch_size, self._kv_len[layer_idx])
+            # take the newly added part of the attention mask
+            attention_mask = attention_mask[:, -seq_len:].repeat(1, num_head) # shape: [batch_size, num_heads * seq_len]
+            self.mask_cache[layer_idx] = torch.scatter(self.mask_cache[layer_idx], -1, valid_update_index, attention_mask)
+
+        valid_update_index = valid_update_index.unsqueeze(-1).expand(-1, -1, head_dim) # shape: [batch_size, num_heads * seq_len, head_dim]
 
         # assign the new key_states and value_states to the cache by the update_index
         self.key_cache[layer_idx] = torch.scatter(self.key_cache[layer_idx], -2, valid_update_index, valid_key_states)
@@ -801,13 +830,12 @@ def moa_config_to_cache_config(
                 )
         summary = pd.DataFrame(summary)
         pd.options.display.float_format = "{:.2f}".format  # keep two digits for all values during printing
-        
         # reduce the summary for each layer
         layer_summary = (
             summary.groupby("layer_id")
             .agg(
                 {
-                    "raw_cache_size": ["mean", "min", "max"],
+                    "raw_cache_size": "mean",
                     "cache_size": ["mean", "min", "max"],
                     "static_size": ["mean", "min", "max"],
                     "circular_size": ["mean", "min", "max"],
@@ -818,31 +846,26 @@ def moa_config_to_cache_config(
         )
         print(layer_summary)
         # reduce the summary for the whole model
-        model_summary = layer_summary.agg(
+        model_summary = summary.agg(
             {
-                ("raw_cache_size", "mean"): "mean",
-                ("raw_cache_size", "min"): "min",
-                ("raw_cache_size", "max"): "max",
-                ("cache_size", "mean"): "mean",
-                ("cache_size", "min"): "min",
-                ("cache_size", "max"): "max",
-                ("static_size", "mean"): "mean",
-                ("static_size", "min"): "min",
-                ("static_size", "max"): "max",
-                ("circular_size", "mean"): "mean",
-                ("circular_size", "min"): "min",
-                ("circular_size", "max"): "max",
-                ("ratio", "mean"): "mean",
-                ("ratio", "min"): "min",
-                ("ratio", "max"): "max",
+                "raw_cache_size": ["mean", "min", "max"],
+                "cache_size": ["mean", "min", "max"],
+                "static_size": ["mean", "min", "max"],
+                "circular_size": ["mean", "min", "max"],
+                "ratio": ["mean", "min", "max"],
             }
-        ).to_frame().T.reset_index(drop=True)
+        ).T
+        model_summary.columns = ["mean", "min", "max"]
+        model_summary = model_summary.unstack().reset_index()
+        model_summary.columns = ["metric", "stat", "value"]
+        model_summary = model_summary.pivot(index="metric", columns="stat", values="value").reset_index()
         print(model_summary)
 
     return {
         "cache_size": cache_size_dict,
         "static_size": static_size_dict,
     }
+
 
 if __name__ == "__main__":
     batch_size = 2

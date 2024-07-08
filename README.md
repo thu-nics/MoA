@@ -190,4 +190,7 @@ CUDA_VISIBLE_DEVICES=0 python scripts/evaluate/chat_demo.py --model_name lmsys/v
 
 - [ ] Support padding in batch inference
 
+- [ ] Support prefill with past_key_values (use Key-Value cache in multi-round conversation)
+
 - [ ] Further optimize kernel performance
+
