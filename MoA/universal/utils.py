@@ -3,6 +3,7 @@ from typing import Tuple, List, Dict
 import pandas as pd
 from copy import deepcopy
 from transformers import AutoTokenizer
+import json
 
 def get_user_assistant_prefix(model_name) -> Tuple[torch.Tensor, torch.Tensor]:
     """
@@ -256,3 +257,41 @@ def combine_summary_table(weight_prune_summary_table, quant_summary_table):
     combined_table['origin_accuracy_loss'] = weight_prune_summary_table['accuracy_loss']
     combined_table['origin_latency'] = weight_prune_summary_table['latency']
     return combined_table
+
+def config_dataframe_to_json(dataframe: pd.DataFrame):
+    """
+
+    Example: 
+        df = pd.read_csv(csv_file_path)
+        json = config_dataframe_to_json(df)
+        with open(output_json_path, 'w') as json_file:
+            json.dump(json_data, json_file, indent=4)
+
+    """
+
+    # Extract unique layer identifiers
+    layers = dataframe['layer_id'].unique()
+
+    # Create the JSON structure
+    json_data = {
+        'alphas': [],
+        'betas': []
+    }
+
+    # Populate the JSON data structure
+    for layer in layers:
+        layer_data = dataframe[dataframe['layer_id'] == layer]
+        heads = layer_data['head_id'].unique()
+        
+        layer_alphas = []
+        layer_betas = []
+        
+        for head in heads:
+            head_data = layer_data[layer_data['head_id'] == head]
+            layer_alphas.append(head_data['alpha_value'].values[0])
+            layer_betas.append(head_data['beta_value'].values[0])
+        
+        json_data['alphas'].append(layer_alphas)
+        json_data['betas'].append(layer_betas)
+
+    return json_data

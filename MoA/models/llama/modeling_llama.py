@@ -2,7 +2,7 @@
 # Align with transformer==4.36.2
 """ PyTorch LLaMA model."""
 import math
-from typing import List, Optional, Tuple, Union
+from typing import List, Optional, Tuple, Union, Dict
 import warnings
 
 import torch
@@ -20,13 +20,13 @@ from transformers.modeling_attn_mask_utils import _prepare_4d_causal_attention_m
 import contextlib
 
 from transformers import LlamaModel
-from transformers.models.llama.modeling_llama import repeat_kv, apply_rotary_pos_emb, rotate_half
+from transformers.models.llama.modeling_llama import LlamaAttention, repeat_kv, apply_rotary_pos_emb, rotate_half
 
 
 from types import MethodType
 
 from MoA.attention.convert import block_sparse_to_dense
-from MoA.attention.cache_utils import NewDynamicCache, CircularCache, StreamingllmDynamicCache
+from MoA.attention.cache_utils import StaticCircularCache, StreamingllmDynamicCache, moa_config_to_cache_config
 from MoA.attention.permutation_utils import (
     permute_attention_projection, 
     permute_output_projection, 
@@ -34,6 +34,7 @@ from MoA.attention.permutation_utils import (
     lut_to_permutation, 
     get_lut_global_size,
     get_lut_band_size,
+    moa_config_to_permutation,
 )
 
 from MoA.attention.density_calculation import streamingllm_attention_density, streamingllm_kv_cache_density
@@ -42,36 +43,13 @@ logger = logging.get_logger(__name__)
 
 _CONFIG_FOR_DOC = "LlamaConfig"
 
+
 """
-efficient llama attention using lut
+efficient implementation for Mixture of Attention
 """
-from MoA.kernels.block_sparse_attention_lut import sparse_attention
+from MoA.kernels.mixture_of_attention import mixture_of_sparse_attention
 
-def lut_to_single_query_kv_mask(
-    lut: torch.Tensor,
-    query_idx: int,
-    block_size: int = 64,
-):
-    if len(lut.size()) == 4:
-        # raise warning, but proceed
-        warnings.warn("The input lut has four dimensions, please make sure that lut is the same across all heads in the layer")
-        lut = lut[0, 0, :, :]
-    else:
-        lut = lut[0]
-
-    kv_length = query_idx + 1
-
-    query_block_idx = query_idx // block_size
-    query_block_lut = lut[query_block_idx]
-    seen_id = [0 for _ in range(kv_length)]
-    for i in query_block_lut:
-        for j in range(i * block_size, min((i + 1) * block_size, kv_length)):
-            seen_id[j] = 1
-
-    return seen_id
-
-
-def LlamaModel_block_sparse_lut_forward(
+def LlamaModel_MixtureAttention_forward(
     self,
     input_ids: torch.LongTensor = None,
     attention_mask: Optional[torch.Tensor] = None,
@@ -112,18 +90,31 @@ def LlamaModel_block_sparse_lut_forward(
     ### prepare cache ###
     if use_cache:
         if past_key_values is None:
-            past_key_values = CircularCache(pattern_num=2, num_layers=len(self.layers))
-        past_key_values_length = past_key_values.seen_tokens
+            # initialize the cache
+            head_dim = self.config.hidden_size // self.config.num_attention_heads
+            cache_config = moa_config_to_cache_config(
+                self.moa_config,
+                seq_length,
+                max_new_token=0,
+                sink_size=64,
+                minimum_cache_size=128,
+            )
+            past_key_values = StaticCircularCache(
+                **cache_config,
+                batch_size=batch_size,
+                head_dim=head_dim,
+                device=self.device,
+                dtype=self.dtype,
+            )
+        past_key_values_length = past_key_values.get_seq_length() # noqa
     ### end of perpare cache ###
 
-    ### position_ids
-    # ignore the passed in position_ids and compute a new one.
-    device = input_ids.device if input_ids is not None else inputs_embeds.device
-    position_ids = torch.arange(
-        past_key_values_length, seq_length + past_key_values_length, dtype=torch.long, device=device
-    )
-    position_ids = position_ids.unsqueeze(0)
-    ### end of position_ids
+    if position_ids is None:
+        device = input_ids.device if input_ids is not None else inputs_embeds.device
+        position_ids = torch.arange(
+            past_key_values_length, seq_length + past_key_values_length, dtype=torch.long, device=device
+        )
+        position_ids = position_ids.unsqueeze(0)
 
     if inputs_embeds is None:
         inputs_embeds = self.embed_tokens(input_ids)
@@ -206,7 +197,7 @@ def LlamaModel_block_sparse_lut_forward(
         ### end of modification ###
     if not return_dict:
         return tuple(v for v in [hidden_states, next_cache, all_hidden_states, all_self_attns] if v is not None)
-    
+
     ### only pass the hidden_states of last seq length
     # ! you can pass only the hidden_states of last seq length for better performance
     return BaseModelOutputWithPast(
@@ -218,6 +209,586 @@ def LlamaModel_block_sparse_lut_forward(
         attentions=all_self_attns,
     )
     ######
+
+
+class LlamaMixtureAttention(LlamaAttention):
+
+    def forward(
+            self,
+            hidden_states: torch.Tensor,
+            attention_mask: Optional[torch.Tensor] = None,
+            position_ids: Optional[torch.LongTensor] = None,
+            past_key_value: Optional[Cache] = None,
+            output_attentions: bool = False,
+            use_cache: bool = False,
+            **kwargs,
+        ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+
+        ### begin modification ###
+        assert self.num_key_value_groups == 1, "only support one key value group now, but got {}".format(self.num_key_value_groups)
+        
+        if output_attentions:
+            raise NotImplementedError("output_attentions is not supported in mixture of attention")
+        ### end of modification ###
+
+        bsz, q_len, _ = hidden_states.size()
+
+        query_states = self.q_proj(hidden_states)
+        key_states = self.k_proj(hidden_states)
+        value_states = self.v_proj(hidden_states)
+
+        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+        key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+        value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+
+        kv_seq_len = key_states.shape[-2]
+        if past_key_value is not None:
+            kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
+        cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
+
+        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
+
+        if past_key_value is not None:
+            cache_kwargs = {"sin": sin, "cos": cos}  # Specific to RoPE models
+            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+
+        if attention_mask is not None:
+            if attention_mask.size() != (bsz, 1, q_len, kv_seq_len):
+                raise ValueError(
+                    f"Attention mask should be of size {(bsz, 1, q_len, kv_seq_len)}, but is {attention_mask.size()}"
+                )
+
+        ### begin modification ###
+        # the key and value states before past_key_value.update are tensors of shape (bsz, num_heads, q_len, head_dim); after updating:
+        # 1. During prefill, the do not change in shape
+        # 2. During decode, they become tensors of shape (bsz, \sum_h^H cache_size_of_head_h, head_dim)
+        if self.num_key_value_groups > 1:
+            raise NotImplementedError("only support one key value group now")
+            key_states = repeat_kv(key_states, self.num_key_value_groups)
+            value_states = repeat_kv(value_states, self.num_key_value_groups)
+
+        # Contiguous is necessary here because of the view call in the linear layers
+        if query_states.device.type == "cuda" and attention_mask is not None and isinstance(key_states, torch.Tensor):
+            query_states = query_states.contiguous()
+            key_states = key_states.contiguous()
+            value_states = value_states.contiguous()
+        ### end of modification ###        
+
+        ### begin modification ###
+        assert self.training == False, "only support inference now"
+        if isinstance(past_key_value, StaticCircularCache):
+            head_index = past_key_value.head_index[self.layer_idx]
+        else:
+            head_index = None
+        attn_output = mixture_of_sparse_attention(
+            query_states,
+            key_states,
+            value_states,
+            sm_scale=self.head_dim ** -0.5,
+            head_index=head_index,
+            attention_mask=attention_mask,
+            attention_dropout=0.0,
+        )
+        ### end modification ###
+
+        attn_output = attn_output.transpose(1, 2).contiguous()
+        attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
+
+        attn_output = self.o_proj(attn_output)
+
+        return attn_output, None, past_key_value
+
+
+def LlamaModel_set_mixture_of_attention(
+        self, 
+        moa_config: Dict,
+        permute_head: bool = False,
+        sparse_prefill: bool = False, 
+        sparse_decode: bool = True,
+        device: Optional[str] = None, 
+    ):
+    """
+    Set the mixture of attention of the model
+    """
+    # update forward functions
+    self.forward = MethodType(LlamaModel_MixtureAttention_forward, self) # rename later
+
+    # update functions in LlamaAttention
+    for layer in self.layers:
+        layer.self_attn.forward = MethodType(LlamaMixtureAttention.forward, layer.self_attn)
+
+    alphas: Union[List[List[int]], List[Tensor]] = moa_config['alphas']
+    betas: Union[List[List[float]], List[Tensor]] = moa_config['betas']
+    # block_size: int = moa_config['block_size']
+
+    def permute_head_func(
+            self,
+            moa_config: Dict,
+    ):
+        alphas: Union[List[List[int]], List[Tensor]] = moa_config['alphas']
+        betas: Union[List[List[float]], List[Tensor]] = moa_config['betas']
+
+        permutations, clusters = moa_config_to_permutation(moa_config)
+        for layer_id, layer in enumerate(self.layers):
+            permutation = permutations[layer_id]
+            cluster = clusters[layer_id]
+
+            # permute alpha and beta based on the permutation
+            alphas[layer_id] = [alphas[layer_id][i] for i in permutation]
+            betas[layer_id] = [betas[layer_id][i] for i in permutation]
+
+            # TODO: merge layer permute to this function
+            num_heads = layer.self_attn.num_heads
+            permute_attention_projection(layer.self_attn.q_proj, permutation, num_heads)
+            permute_attention_projection(layer.self_attn.k_proj, permutation, num_heads)
+            permute_attention_projection(layer.self_attn.v_proj, permutation, num_heads)
+            permute_output_projection(layer.self_attn.o_proj, permutation, num_heads)
+
+        moa_config['alphas'] = alphas
+        moa_config['betas'] = betas
+
+    if permute_head:
+        permute_head_func(self, moa_config)        
+
+    self.use_moa = True
+    self.moa_config = moa_config
+
+
+"""
+efficient block sparse llama attention using lut
+"""
+from MoA.kernels.block_sparse_attention_lut import sparse_attention
+
+def lut_to_single_query_kv_mask(
+    lut: torch.Tensor,
+    query_idx: int,
+    block_size: int = 64,
+):
+    if len(lut.size()) == 4:
+        # raise warning, but proceed
+        warnings.warn("The input lut has four dimensions, please make sure that lut is the same across all heads in the layer")
+        lut = lut[0, 0, :, :]
+    else:
+        lut = lut[0]
+
+    kv_length = query_idx + 1
+
+    query_block_idx = query_idx // block_size
+    query_block_lut = lut[query_block_idx]
+    seen_id = [0 for _ in range(kv_length)]
+    for i in query_block_lut:
+        for j in range(i * block_size, min((i + 1) * block_size, kv_length)):
+            seen_id[j] = 1
+
+    return seen_id
+
+
+def lut2layout_single_layer(lut: torch.IntTensor) -> torch.BoolTensor:
+    """
+    input:
+        lut: (num_heads, num_block, nnz)
+        num_block: the number of blocks
+    output:
+        layout: (num_heads, num_block, num_block)
+    """
+    num_block = lut.shape[1]
+
+    assert num_block >= lut.max().item(), "The number of blocks should be larger than the maximum value in the LUT."
+   
+    num_head = lut.shape[0]
+    layout = torch.zeros((num_head, num_block, num_block), dtype=torch.bool, device=lut.device)
+
+    for i in range(num_head):
+        for j in range(num_block):
+            for k in range(lut.shape[2]):
+                layout[i, j, lut[i, j, k]] = True
+
+    return layout
+
+
+def LlamaAttention_block_sparse_lut_forward_fake_sparse_decode(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_value: Optional[Cache] = None,
+        output_attentions: bool = False,
+        use_cache: bool = False,
+        **kwargs,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+    if "padding_mask" in kwargs:
+        warnings.warn(
+            "Passing `padding_mask` is deprecated and will be removed in v4.37. Please make sure use `attention_mask` instead.`"
+        )
+
+    bsz, q_len, _ = hidden_states.size()
+
+    if self.config.pretraining_tp > 1:
+        key_value_slicing = (self.num_key_value_heads * self.head_dim) // self.config.pretraining_tp
+        query_slices = self.q_proj.weight.split(
+            (self.num_heads * self.head_dim) // self.config.pretraining_tp, dim=0
+        )
+        key_slices = self.k_proj.weight.split(key_value_slicing, dim=0)
+        value_slices = self.v_proj.weight.split(key_value_slicing, dim=0)
+
+        query_states = [F.linear(hidden_states, query_slices[i]) for i in range(self.config.pretraining_tp)]
+        query_states = torch.cat(query_states, dim=-1)
+
+        key_states = [F.linear(hidden_states, key_slices[i]) for i in range(self.config.pretraining_tp)]
+        key_states = torch.cat(key_states, dim=-1)
+
+        value_states = [F.linear(hidden_states, value_slices[i]) for i in range(self.config.pretraining_tp)]
+        value_states = torch.cat(value_states, dim=-1)
+
+    else:
+        query_states = self.q_proj(hidden_states)
+        key_states = self.k_proj(hidden_states)
+        value_states = self.v_proj(hidden_states)
+
+    query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+    key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+    value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+
+    kv_seq_len = key_states.shape[-2]
+    if past_key_value is not None:
+        if self.layer_idx is None:
+            raise ValueError(
+                f"The cache structure has changed since version v4.36. If you are using {self.__class__.__name__} "
+                "for auto-regressive decoding with k/v caching, please make sure to initialize the attention class "
+                "with a layer index."
+            )
+        kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
+    cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
+    query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
+
+    if past_key_value is not None:
+        cache_kwargs = {"sin": sin, "cos": cos}  # Specific to RoPE models
+        key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+
+    key_states = repeat_kv(key_states, self.num_key_value_groups)
+    value_states = repeat_kv(value_states, self.num_key_value_groups)
+
+    ## find the smallest lut in lut list that is greater than the kv_seq_len
+    ## the key of self.lut_list is the supported lut len
+    lut_len = min([k for k in self.lut_dict if k >= kv_seq_len])
+    lut = self.lut_dict[lut_len]
+
+    ### decoding stage: drop kv according to lut
+    if q_len == 1 and self.sparse_decode:
+        query_block_idx = (kv_seq_len - 1) // self.block_size
+        layout = self.layout_dict[lut_len]
+        current_layout = layout[:, query_block_idx:query_block_idx+1, :]
+        attention_mask = current_layout.repeat_interleave(self.block_size, dim=-1)[:, :, :kv_seq_len]
+        attention_mask = attention_mask.unsqueeze(0).to(torch.bool)
+    ### decoding stage: drop kv according to lut
+
+    ### efficient attention implementation ###
+    attn_output = self.efficient_attention(
+        # for prefill
+        query_states, 
+        key_states, 
+        value_states, 
+        self.head_dim**-0.5, 
+        lut, 
+        self.block_size, 
+        self.block_size,
+        # for decode
+        attention_mask,
+        self.attention_dropout if self.training else 0.0 # noqa
+    )
+    ### end efficient attention implementation ###
+
+    if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
+            raise ValueError(
+                f"`attn_output` should be of size {(bsz, self.num_heads, q_len, self.head_dim)}, but is"
+                f" {attn_output.size()}"
+            )
+
+    attn_output = attn_output.transpose(1, 2).contiguous()
+
+    attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
+
+    if self.config.pretraining_tp > 1:
+        attn_output = attn_output.split(self.hidden_size // self.config.pretraining_tp, dim=2)
+        o_proj_slices = self.o_proj.weight.split(self.hidden_size // self.config.pretraining_tp, dim=1)
+        attn_output = sum([F.linear(attn_output[i], o_proj_slices[i]) for i in range(self.config.pretraining_tp)])
+    else:
+        attn_output = self.o_proj(attn_output)
+
+    if not output_attentions:
+        attn_weights = None
+
+    return attn_output, attn_weights, past_key_value
+
+
+def LlamaAttention_block_sparse_lut_forward_split_head(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_value: Optional[Cache] = None,
+        output_attentions: bool = False,
+        use_cache: bool = False,
+        **kwargs,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+    if "padding_mask" in kwargs:
+        warnings.warn(
+            "Passing `padding_mask` is deprecated and will be removed in v4.37. Please make sure use `attention_mask` instead.`"
+        )
+
+    bsz, q_len, _ = hidden_states.size()
+
+    if self.config.pretraining_tp > 1:
+        key_value_slicing = (self.num_key_value_heads * self.head_dim) // self.config.pretraining_tp
+        query_slices = self.q_proj.weight.split(
+            (self.num_heads * self.head_dim) // self.config.pretraining_tp, dim=0
+        )
+        key_slices = self.k_proj.weight.split(key_value_slicing, dim=0)
+        value_slices = self.v_proj.weight.split(key_value_slicing, dim=0)
+
+        query_states = [F.linear(hidden_states, query_slices[i]) for i in range(self.config.pretraining_tp)]
+        query_states = torch.cat(query_states, dim=-1)
+
+        key_states = [F.linear(hidden_states, key_slices[i]) for i in range(self.config.pretraining_tp)]
+        key_states = torch.cat(key_states, dim=-1)
+
+        value_states = [F.linear(hidden_states, value_slices[i]) for i in range(self.config.pretraining_tp)]
+        value_states = torch.cat(value_states, dim=-1)
+
+    else:
+        query_states = self.q_proj(hidden_states)
+        key_states = self.k_proj(hidden_states)
+        value_states = self.v_proj(hidden_states)
+
+    query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+    key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+    value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+
+    assert self.num_key_value_groups == 1, "only support one key value group now, but got {}".format(self.num_key_value_groups)
+    divide_head = (hasattr(self, 'cluster') and (q_len == 1))
+
+    kv_seq_len = key_states.shape[-2]
+    if past_key_value is not None:
+        if self.layer_idx is None:
+            raise ValueError(
+                f"The cache structure has changed since version v4.36. If you are using {self.__class__.__name__} "
+                "for auto-regressive decoding with k/v caching, please make sure to initialize the attention class "
+                "with a layer index."
+            )
+        kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
+    cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
+
+    # find the shortest lut that is greater than kv_seq_len
+    usable_lut_len = [k for k in self.lut_dict if k >= kv_seq_len]
+    if len(usable_lut_len) == 0:
+        lut_len = max(self.lut_dict.keys())
+        if not q_len != 1:
+            raise ValueError(f"input token len exceeded at prefilling stages. kv_len: {kv_seq_len}")
+        
+    else:
+        lut_len = min([k for k in self.lut_dict if k >= kv_seq_len])
+
+    lut = self.lut_dict[lut_len]
+    band_size = self.band_size_dict[lut_len]
+    global_size = self.global_size_dict[lut_len]
+
+    if hasattr(self, 'cluster'):
+        # split the query, key, value states
+        assert len(self.cluster) <= 2
+        cluster0 = self.cluster[0]
+        cluster1 = self.cluster[1] if len(self.cluster) == 2 else None
+        query_states0 = query_states[:, cluster0[0]:cluster0[1], :, :]
+        query_states1 = query_states[:, cluster1[0]:cluster1[1], :, :] if cluster1 is not None else None
+        key_states0 = key_states[:, cluster0[0]:cluster0[1], :, :]
+        key_states1 = key_states[:, cluster1[0]:cluster1[1], :, :] if cluster1 is not None else None
+        value_states0 = value_states[:, cluster0[0]:cluster0[1], :, :]
+        value_states1 = value_states[:, cluster1[0]:cluster1[1], :, :] if cluster1 is not None else None
+
+
+    query_states0, key_states0 = apply_rotary_pos_emb(query_states0, key_states0, cos, sin, position_ids)
+    query_states1, key_states1 = apply_rotary_pos_emb(query_states1, key_states1, cos, sin, position_ids) if cluster1 is not None else (None, None)
+
+    if not divide_head:
+        if cluster1 is None:
+            query_states = query_states0
+            key_states = key_states0
+        else:
+            query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
+
+    cache_kwargs = {"sin": sin, "cos": cos}  # Specific to RoPE models
+    updated_key_states, updates_value_states = past_key_value.update(
+        [key_states0, key_states1], 
+        [value_states0, value_states1],
+        self.layer_idx,
+        global_size,
+        band_size,
+        cache_kwargs,
+    )
+
+    if divide_head:
+        attn_output0 = self.efficient_attention(
+            query_states0, 
+            updated_key_states[0], 
+            updates_value_states[0], 
+            self.head_dim**-0.5, 
+            None, 
+            self.block_size, 
+            self.block_size,
+            None,
+            self.attention_dropout if self.training else 0.0
+        )
+        attn_output1 = self.efficient_attention(
+            query_states1,
+            updated_key_states[1],
+            updates_value_states[1],
+            self.head_dim**-0.5,
+            None,
+            self.block_size,
+            self.block_size,
+            None,
+            self.attention_dropout if self.training else 0.0
+        ) if cluster1 is not None else None
+
+        # concat the output
+        attn_output = torch.cat([attn_output0, attn_output1], dim=1) if cluster1 is not None else attn_output0
+
+    else:
+        attn_output = self.efficient_attention(
+            # for prefill
+            query_states, 
+            key_states, 
+            value_states, 
+            self.head_dim**-0.5, 
+            lut, 
+            self.block_size, 
+            self.block_size,
+            # for decode
+            attention_mask,
+            self.attention_dropout if self.training else 0.0 # noqa
+        )
+
+    if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
+            raise ValueError(
+                f"`attn_output` should be of size {(bsz, self.num_heads, q_len, self.head_dim)}, but is"
+                f" {attn_output.size()}"
+            )
+
+    attn_output = attn_output.transpose(1, 2).contiguous()
+
+    attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
+
+    if self.config.pretraining_tp > 1:
+        attn_output = attn_output.split(self.hidden_size // self.config.pretraining_tp, dim=2)
+        o_proj_slices = self.o_proj.weight.split(self.hidden_size // self.config.pretraining_tp, dim=1)
+        attn_output = sum([F.linear(attn_output[i], o_proj_slices[i]) for i in range(self.config.pretraining_tp)])
+    else:
+        attn_output = self.o_proj(attn_output)
+
+    if not output_attentions:
+        attn_weights = None
+
+    return attn_output, attn_weights, past_key_value
+
+
+def apply_rotary_pos_emb_single(x, cos, sin, position_ids, unsqueeze_dim=1):
+    cos = cos[position_ids].unsqueeze(unsqueeze_dim)
+    sin = sin[position_ids].unsqueeze(unsqueeze_dim)
+    x_embed = (x * cos) + (rotate_half(x) * sin)
+
+    return x_embed
+
+
+def LlamaDecoderLayer_set_static_attention_lut(self, lut_list, lut_for_head, block_size: int, device: Optional[str] = None, permute_head=False, sparse_decode=False):
+    """
+    Set the attention layout of the decoder layer
+
+    lut: a tuple has 'layer' elements, each element has the size of [lut_num_heads, num_block, nnz]
+    lut_for_head: a tuple has 'layer' elements, each element has the size of [lut_num_heads]
+                  we use it as an indicator when combine heads
+    block_size: int
+    device: str
+    """
+
+    if isinstance(lut_list, List) is False:
+        lut_list = [lut_list]
+
+    # print(f"permute head is set to {permute_head}")
+
+    # self.self_attn.efficient_attention = sparse_attention_prefill
+    num_heads = lut_list[0].shape[0]
+    self.self_attn.efficient_attention = sparse_attention
+    if device is None:
+        device = self.self_attn.o_proj.weight.device
+        # print(device)
+    lut_list = [lut.to(device) for lut in lut_list]
+    lut_token_len = [lut.shape[1] * block_size for lut in lut_list]
+       
+    if permute_head:
+        # get a single permutation and a single cluster from lut_list
+        permutation, cluster = lut_to_permutation(lut_list, num_heads)
+        # print("The number of different rules per layer is ", len(cluster))
+        
+        # assert cluster dictionary has only two records
+        assert len(cluster) <= 2, f"to use permute head, you must have at most two patterns for the head, currently have {len(cluster)}"
+        lut_list = [permute_lut(lut, permutation, num_heads) for lut in lut_list]
+        self.self_attn.permutation = permutation
+        self.self_attn.cluster = cluster
+
+        lut0_list = [lut[cluster[0][0], :, :] for lut in lut_list]
+        lut1_list = [lut[cluster[1][0], :, :] for lut in lut_list] if len(cluster) == 2 else None
+
+        global0_list = [get_lut_global_size(lut0, block_size) for lut0 in lut0_list]
+        global1_list = [get_lut_global_size(lut1, block_size) for lut1 in lut1_list] if len(cluster) == 2 else [None for _ in lut0_list]
+
+        self.self_attn.global_size_dict = {i: (global0, global1) for i, global0, global1 in zip(lut_token_len, global0_list, global1_list)}
+
+        band_list  = [get_lut_band_size(lut0, block_size) for lut0 in lut0_list]
+        band1_list = [get_lut_band_size(lut1, block_size) for lut1 in lut1_list] if len(cluster) == 2 else [None for _ in lut0_list]
+
+        self.self_attn.band_size_dict = {i: (band, band1) for i, band, band1 in zip(lut_token_len, band_list, band1_list)}
+
+    lut_dict = {i: lut for i, lut in zip(lut_token_len, lut_list)}
+    self.self_attn.lut_dict = lut_dict
+
+    if not permute_head and sparse_decode:
+        layout_list = [lut2layout_single_layer(lut.to('cpu')).to('cuda') for lut in lut_list]
+        self.self_attn.layout_dict = {i: layout for i, layout in zip(lut_token_len, layout_list)}
+        print("successfully convert lut to layout")
+
+    self.self_attn.lut_for_head = lut_for_head
+    self.self_attn.block_size = block_size
+
+    if permute_head:
+        permute_attention_projection(self.self_attn.q_proj, permutation, num_heads)
+        permute_attention_projection(self.self_attn.k_proj, permutation, num_heads)
+        permute_attention_projection(self.self_attn.v_proj, permutation, num_heads)
+        permute_output_projection(self.self_attn.o_proj, permutation, num_heads)
+
+
+def LlamaModel_use_block_sparse_attention_lut(self, permute_head=False, sparse_decode=False):
+    """
+    Overall interface
+    Set the model instance to use efficient attention instead of llama attention
+    """
+
+    # update functions in LlamaModel
+    if permute_head:
+        self.set_mixture_of_attention = MethodType(LlamaModel_set_mixture_of_attention, self)
+        self.forward = MethodType(LlamaModel_MixtureAttention_forward, self)
+
+    # update functions in LlamaAttention
+    for layer in self.layers:
+        if permute_head:
+            layer.self_attn.forward = MethodType(LlamaAttention_block_sparse_lut_forward_split_head, layer.self_attn)
+        else:
+            layer.self_attn.forward = MethodType(LlamaAttention_block_sparse_lut_forward_fake_sparse_decode, layer.self_attn)
+            layer.self_attn.sparse_decode = sparse_decode
+
+        layer.set_static_attention_lut = MethodType(LlamaDecoderLayer_set_static_attention_lut, layer)
+
+"""
+streamingLLM implementation
+"""
 
 def LlamaModel_Streamingllm_forward(
     self,
@@ -352,321 +923,6 @@ def LlamaModel_Streamingllm_forward(
         hidden_states=all_hidden_states,
         attentions=all_self_attns,
     )
-
-
-
-def lut2layout_single_layer(lut: torch.IntTensor) -> torch.BoolTensor:
-    """
-    input:
-        lut: (num_heads, num_block, nnz)
-        num_block: the number of blocks
-    output:
-        layout: (num_heads, num_block, num_block)
-    """
-    num_block = lut.shape[1]
-
-    assert num_block >= lut.max().item(), "The number of blocks should be larger than the maximum value in the LUT."
-   
-    num_head = lut.shape[0]
-    layout = torch.zeros((num_head, num_block, num_block), dtype=torch.bool, device=lut.device)
-
-    for i in range(num_head):
-        for j in range(num_block):
-            for k in range(lut.shape[2]):
-                layout[i, j, lut[i, j, k]] = True
-
-    return layout
-
-def LlamaAttention_block_sparse_lut_forward_fake_sparse_decode(
-        self,
-        hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        past_key_value: Optional[Cache] = None,
-        output_attentions: bool = False,
-        use_cache: bool = False,
-        **kwargs,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
-    if "padding_mask" in kwargs:
-        warnings.warn(
-            "Passing `padding_mask` is deprecated and will be removed in v4.37. Please make sure use `attention_mask` instead.`"
-        )
-
-    bsz, q_len, _ = hidden_states.size()
-
-    if self.config.pretraining_tp > 1:
-        key_value_slicing = (self.num_key_value_heads * self.head_dim) // self.config.pretraining_tp
-        query_slices = self.q_proj.weight.split(
-            (self.num_heads * self.head_dim) // self.config.pretraining_tp, dim=0
-        )
-        key_slices = self.k_proj.weight.split(key_value_slicing, dim=0)
-        value_slices = self.v_proj.weight.split(key_value_slicing, dim=0)
-
-        query_states = [F.linear(hidden_states, query_slices[i]) for i in range(self.config.pretraining_tp)]
-        query_states = torch.cat(query_states, dim=-1)
-
-        key_states = [F.linear(hidden_states, key_slices[i]) for i in range(self.config.pretraining_tp)]
-        key_states = torch.cat(key_states, dim=-1)
-
-        value_states = [F.linear(hidden_states, value_slices[i]) for i in range(self.config.pretraining_tp)]
-        value_states = torch.cat(value_states, dim=-1)
-
-    else:
-        query_states = self.q_proj(hidden_states)
-        key_states = self.k_proj(hidden_states)
-        value_states = self.v_proj(hidden_states)
-
-    query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-    key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-    value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-
-    kv_seq_len = key_states.shape[-2]
-    if past_key_value is not None:
-        if self.layer_idx is None:
-            raise ValueError(
-                f"The cache structure has changed since version v4.36. If you are using {self.__class__.__name__} "
-                "for auto-regressive decoding with k/v caching, please make sure to initialize the attention class "
-                "with a layer index."
-            )
-        kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
-    cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
-    query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
-
-    if past_key_value is not None:
-        cache_kwargs = {"sin": sin, "cos": cos}  # Specific to RoPE models
-        key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
-
-    key_states = repeat_kv(key_states, self.num_key_value_groups)
-    value_states = repeat_kv(value_states, self.num_key_value_groups)
-
-    ## find the smallest lut in lut list that is greater than the kv_seq_len
-    ## the key of self.lut_list is the supported lut len
-    lut_len = min([k for k in self.lut_dict if k >= kv_seq_len])
-    lut = self.lut_dict[lut_len]
-
-    ### decoding stage: drop kv according to lut
-    if q_len == 1 and self.sparse_decode:
-        query_block_idx = (kv_seq_len - 1) // self.block_size
-        layout = self.layout_dict[lut_len]
-        current_layout = layout[:, query_block_idx:query_block_idx+1, :]
-        attention_mask = current_layout.repeat_interleave(self.block_size, dim=-1)[:, :, :kv_seq_len]
-        attention_mask = attention_mask.unsqueeze(0).to(torch.bool)
-    ### decoding stage: drop kv according to lut
-
-    ### efficient attention implementation ###
-    attn_output = self.efficient_attention(
-        # for prefill
-        query_states, 
-        key_states, 
-        value_states, 
-        self.head_dim**-0.5, 
-        lut, 
-        self.block_size, 
-        self.block_size,
-        # for decode
-        attention_mask,
-        self.attention_dropout if self.training else 0.0 # noqa
-    )
-    ### end efficient attention implementation ###
-
-    if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
-            raise ValueError(
-                f"`attn_output` should be of size {(bsz, self.num_heads, q_len, self.head_dim)}, but is"
-                f" {attn_output.size()}"
-            )
-
-    attn_output = attn_output.transpose(1, 2).contiguous()
-
-    attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
-
-    if self.config.pretraining_tp > 1:
-        attn_output = attn_output.split(self.hidden_size // self.config.pretraining_tp, dim=2)
-        o_proj_slices = self.o_proj.weight.split(self.hidden_size // self.config.pretraining_tp, dim=1)
-        attn_output = sum([F.linear(attn_output[i], o_proj_slices[i]) for i in range(self.config.pretraining_tp)])
-    else:
-        attn_output = self.o_proj(attn_output)
-
-    if not output_attentions:
-        attn_weights = None
-
-    return attn_output, attn_weights, past_key_value
-
-
-
-def LlamaAttention_block_sparse_lut_forward_split_head(
-        self,
-        hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        past_key_value: Optional[Cache] = None,
-        output_attentions: bool = False,
-        use_cache: bool = False,
-        **kwargs,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
-    if "padding_mask" in kwargs:
-        warnings.warn(
-            "Passing `padding_mask` is deprecated and will be removed in v4.37. Please make sure use `attention_mask` instead.`"
-        )
-
-    bsz, q_len, _ = hidden_states.size()
-
-    if self.config.pretraining_tp > 1:
-        key_value_slicing = (self.num_key_value_heads * self.head_dim) // self.config.pretraining_tp
-        query_slices = self.q_proj.weight.split(
-            (self.num_heads * self.head_dim) // self.config.pretraining_tp, dim=0
-        )
-        key_slices = self.k_proj.weight.split(key_value_slicing, dim=0)
-        value_slices = self.v_proj.weight.split(key_value_slicing, dim=0)
-
-        query_states = [F.linear(hidden_states, query_slices[i]) for i in range(self.config.pretraining_tp)]
-        query_states = torch.cat(query_states, dim=-1)
-
-        key_states = [F.linear(hidden_states, key_slices[i]) for i in range(self.config.pretraining_tp)]
-        key_states = torch.cat(key_states, dim=-1)
-
-        value_states = [F.linear(hidden_states, value_slices[i]) for i in range(self.config.pretraining_tp)]
-        value_states = torch.cat(value_states, dim=-1)
-
-    else:
-        query_states = self.q_proj(hidden_states)
-        key_states = self.k_proj(hidden_states)
-        value_states = self.v_proj(hidden_states)
-
-    query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-    key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-    value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-
-    assert self.num_key_value_groups == 1, "only support one key value group now, but got {}".format(self.num_key_value_groups)
-    divide_head = (hasattr(self, 'cluster') and (q_len == 1))
-
-    kv_seq_len = key_states.shape[-2]
-    if past_key_value is not None:
-        if self.layer_idx is None:
-            raise ValueError(
-                f"The cache structure has changed since version v4.36. If you are using {self.__class__.__name__} "
-                "for auto-regressive decoding with k/v caching, please make sure to initialize the attention class "
-                "with a layer index."
-            )
-        kv_seq_len += past_key_value.current_tokens
-    cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
-
-    # find the shortest lut that is greater than kv_seq_len
-    usable_lut_len = [k for k in self.lut_dict if k >= kv_seq_len]
-    if len(usable_lut_len) == 0:
-        lut_len = max(self.lut_dict.keys())
-        if not q_len != 1:
-            raise ValueError(f"input token len exceeded at prefilling stages. kv_len: {kv_seq_len}")
-        
-    else:
-        lut_len = min([k for k in self.lut_dict if k >= kv_seq_len])
-
-    lut = self.lut_dict[lut_len]
-    band_size = self.band_size_dict[lut_len]
-    global_size = self.global_size_dict[lut_len]
-
-    if hasattr(self, 'cluster'):
-        # split the query, key, value states
-        assert len(self.cluster) <= 2
-        cluster0 = self.cluster[0]
-        cluster1 = self.cluster[1] if len(self.cluster) == 2 else None
-        query_states0 = query_states[:, cluster0[0]:cluster0[1], :, :]
-        query_states1 = query_states[:, cluster1[0]:cluster1[1], :, :] if cluster1 is not None else None
-        key_states0 = key_states[:, cluster0[0]:cluster0[1], :, :]
-        key_states1 = key_states[:, cluster1[0]:cluster1[1], :, :] if cluster1 is not None else None
-        value_states0 = value_states[:, cluster0[0]:cluster0[1], :, :]
-        value_states1 = value_states[:, cluster1[0]:cluster1[1], :, :] if cluster1 is not None else None
-
-
-    query_states0, key_states0 = apply_rotary_pos_emb(query_states0, key_states0, cos, sin, position_ids)
-    query_states1, key_states1 = apply_rotary_pos_emb(query_states1, key_states1, cos, sin, position_ids) if cluster1 is not None else (None, None)
-
-    if not divide_head:
-        if cluster1 is None:
-            query_states = query_states0
-            key_states = key_states0
-        else:
-            query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
-
-    cache_kwargs = {"sin": sin, "cos": cos}  # Specific to RoPE models
-    updated_key_states, updates_value_states = past_key_value.update(
-        [key_states0, key_states1], 
-        [value_states0, value_states1],
-        self.layer_idx,
-        global_size,
-        band_size,
-        cache_kwargs,
-    )
-
-    if divide_head:
-        attn_output0 = self.efficient_attention(
-            query_states0, 
-            updated_key_states[0], 
-            updates_value_states[0], 
-            self.head_dim**-0.5, 
-            None, 
-            self.block_size, 
-            self.block_size,
-            None,
-            self.attention_dropout if self.training else 0.0
-        )
-        attn_output1 = self.efficient_attention(
-            query_states1,
-            updated_key_states[1],
-            updates_value_states[1],
-            self.head_dim**-0.5,
-            None,
-            self.block_size,
-            self.block_size,
-            None,
-            self.attention_dropout if self.training else 0.0
-        ) if cluster1 is not None else None
-
-        # concat the output
-        attn_output = torch.cat([attn_output0, attn_output1], dim=1) if cluster1 is not None else attn_output0
-
-    else:
-        attn_output = self.efficient_attention(
-            # for prefill
-            query_states, 
-            key_states, 
-            value_states, 
-            self.head_dim**-0.5, 
-            lut, 
-            self.block_size, 
-            self.block_size,
-            # for decode
-            attention_mask,
-            self.attention_dropout if self.training else 0.0 # noqa
-        )
-
-    if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
-            raise ValueError(
-                f"`attn_output` should be of size {(bsz, self.num_heads, q_len, self.head_dim)}, but is"
-                f" {attn_output.size()}"
-            )
-
-    attn_output = attn_output.transpose(1, 2).contiguous()
-
-    attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
-
-    if self.config.pretraining_tp > 1:
-        attn_output = attn_output.split(self.hidden_size // self.config.pretraining_tp, dim=2)
-        o_proj_slices = self.o_proj.weight.split(self.hidden_size // self.config.pretraining_tp, dim=1)
-        attn_output = sum([F.linear(attn_output[i], o_proj_slices[i]) for i in range(self.config.pretraining_tp)])
-    else:
-        attn_output = self.o_proj(attn_output)
-
-    if not output_attentions:
-        attn_weights = None
-
-    return attn_output, attn_weights, past_key_value
-
-def apply_rotary_pos_emb_single(x, cos, sin, position_ids, unsqueeze_dim=1):
-    cos = cos[position_ids].unsqueeze(unsqueeze_dim)
-    sin = sin[position_ids].unsqueeze(unsqueeze_dim)
-    x_embed = (x * cos) + (rotate_half(x) * sin)
-
-    return x_embed
 
 
 def LlamaAttention_streamingllm_forward(
@@ -859,104 +1115,6 @@ def LlamaAttention_streamingllm_forward(
         return attn_output, attn_weights, past_key_value
 
 
-
-def LlamaDecoderLayer_set_static_attention_lut(self, lut_list, lut_for_head, block_size: int, device: Optional[str] = None, permute_head=False, sparse_decode=False):
-    """
-    Set the attention layout of the decoder layer
-
-    lut: a tuple has 'layer' elements, each element has the size of [lut_num_heads, num_block, nnz]
-    lut_for_head: a tuple has 'layer' elements, each element has the size of [lut_num_heads]
-                  we use it as an indicator when combine heads
-    block_size: int
-    device: str
-    """
-
-    if isinstance(lut_list, List) is False:
-        lut_list = [lut_list]
-
-    # print(f"permute head is set to {permute_head}")
-
-    # self.self_attn.efficient_attention = sparse_attention_prefill
-    num_heads = lut_list[0].shape[0]
-    self.self_attn.efficient_attention = sparse_attention
-    if device is None:
-        device = self.self_attn.o_proj.weight.device
-        # print(device)
-        
-    lut_list = [lut.to(device) for lut in lut_list]
-    lut_token_len = [lut.shape[1] * block_size for lut in lut_list]
-       
-    if permute_head:
-        # get a single permutation and a single cluster from lut_list
-        permutation, cluster = lut_to_permutation(lut_list, num_heads)
-        # print("The number of different rules per layer is ", len(cluster))
-        
-        # assert cluster dictionary has only two records
-        assert len(cluster) <= 2, f"to use permute head, you must have at most two patterns for the head, currently have {len(cluster)}"
-        lut_list = [permute_lut(lut, permutation, num_heads) for lut in lut_list]
-        self.self_attn.permutation = permutation
-        self.self_attn.cluster = cluster
-
-        lut0_list = [lut[cluster[0][0], :, :] for lut in lut_list]
-        lut1_list = [lut[cluster[1][0], :, :] for lut in lut_list] if len(cluster) == 2 else None
-
-        global0_list = [get_lut_global_size(lut0, block_size) for lut0 in lut0_list]
-        global1_list = [get_lut_global_size(lut1, block_size) for lut1 in lut1_list] if len(cluster) == 2 else [None for _ in lut0_list]
-
-        self.self_attn.global_size_dict = {i: (global0, global1) for i, global0, global1 in zip(lut_token_len, global0_list, global1_list)}
-
-        band_list  = [get_lut_band_size(lut0, block_size) for lut0 in lut0_list]
-        band1_list = [get_lut_band_size(lut1, block_size) for lut1 in lut1_list] if len(cluster) == 2 else [None for _ in lut0_list]
-
-        self.self_attn.band_size_dict = {i: (band, band1) for i, band, band1 in zip(lut_token_len, band_list, band1_list)}
-
-    lut_dict = {i: lut for i, lut in zip(lut_token_len, lut_list)}
-    self.self_attn.lut_dict = lut_dict
-
-    if not permute_head and sparse_decode:
-        layout_list = [lut2layout_single_layer(lut.to('cpu')).to('cuda') for lut in lut_list]
-        self.self_attn.layout_dict = {i: layout for i, layout in zip(lut_token_len, layout_list)}
-        print("successfully convert lut to layout")
-
-    self.self_attn.lut_for_head = lut_for_head
-    self.self_attn.block_size = block_size
-
-    if permute_head:
-        permute_attention_projection(self.self_attn.q_proj, permutation, num_heads)
-        permute_attention_projection(self.self_attn.k_proj, permutation, num_heads)
-        permute_attention_projection(self.self_attn.v_proj, permutation, num_heads)
-        permute_output_projection(self.self_attn.o_proj, permutation, num_heads)
-
-def LlamaModel_use_block_sparse_attention_lut(self, permute_head=False, sparse_decode=False):
-    """
-    Set the model instance to use efficient attention instead of llama attention
-    """
-    
-    for layer in self.layers:
-        if permute_head:
-            layer.self_attn.forward = MethodType(LlamaAttention_block_sparse_lut_forward_split_head, layer.self_attn)
-        else:
-            layer.self_attn.forward = MethodType(LlamaAttention_block_sparse_lut_forward_fake_sparse_decode, layer.self_attn)
-            layer.self_attn.sparse_decode = sparse_decode
-
-        layer.set_static_attention_lut = MethodType(LlamaDecoderLayer_set_static_attention_lut, layer)
-
-    ### modify the LlamaModel.forward function to support new Cache class
-    if permute_head:
-        self.forward = MethodType(LlamaModel_block_sparse_lut_forward, self)
-    ### end of modification ###
-
-def LlamaModel_set_mixture_of_attention(self, alphas: List[List[int]], betas: List[List[float]], block_size: int, device: Optional[str] = None, permute_head=False, sparse_decode=False):
-    """
-    Set the mixture of attention of the model
-    """
-    self.moa = True
-    self.moa_config = {
-        'alphas': alphas,
-        'betas': betas,
-        'block_size': block_size,
-    }
-
 def create_streaming_attention_mask(token_len, global_size, band_size):
     # Start by creating an empty mask filled with False (0)
     mask = torch.zeros(1, 1, token_len, token_len, dtype=torch.bool)
@@ -974,6 +1132,7 @@ def create_streaming_attention_mask(token_len, global_size, band_size):
             mask[:, :, i, :min(global_size, i+1)] = True
         
     return mask
+
 
 def LlamaModel_use_streamingllm_attention(model, global_size, band_size, device='cuda', max_length=16384):
     """
