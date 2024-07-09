@@ -35,8 +35,7 @@ class _mixture_of_sparse_attention(torch.autograd.Function):
         # During Decode
         input:
             q: (Z, H, N_IN, L)
-            # k, v: (Z, \sum_i^H N_CTX, L)
-            k, v: [(Z, H, N_CTX, L)] * group
+            k, v: (Z, \sum_i^H N_CTX, L)
             sm_scale: float
             head_index: (H+1)
         output:
@@ -51,7 +50,7 @@ class _mixture_of_sparse_attention(torch.autograd.Function):
         # decode
         if _is_decode:
             # TODO: support contigious cache memory
-            # split group and calculate for now
+            # split group and calculate for now, converting to [(Z, H, N_CTX, L)] * group for k and v
             k = StaticCircularCache.to_group_contigious(k, head_index)
             v = StaticCircularCache.to_group_contigious(v, head_index)
             attention_mask = StaticCircularCache.to_group_contigious(attention_mask, head_index)
