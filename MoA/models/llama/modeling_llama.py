@@ -49,6 +49,7 @@ efficient implementation for Mixture of Attention
 """
 from MoA.kernels.mixture_of_attention import mixture_of_sparse_attention
 
+
 def LlamaModel_MixtureAttention_forward(
     self,
     input_ids: torch.LongTensor = None,
@@ -61,17 +62,27 @@ def LlamaModel_MixtureAttention_forward(
     output_hidden_states: Optional[bool] = None,
     return_dict: Optional[bool] = None,
 ) -> Union[Tuple, BaseModelOutputWithPast]:
-    output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+    output_attentions = (
+        output_attentions
+        if output_attentions is not None
+        else self.config.output_attentions
+    )
     output_hidden_states = (
-        output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+        output_hidden_states
+        if output_hidden_states is not None
+        else self.config.output_hidden_states
     )
     use_cache = use_cache if use_cache is not None else self.config.use_cache
 
-    return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+    return_dict = (
+        return_dict if return_dict is not None else self.config.use_return_dict
+    )
 
     # retrieve input_ids and inputs_embeds
     if input_ids is not None and inputs_embeds is not None:
-        raise ValueError("You cannot specify both input_ids and inputs_embeds at the same time")
+        raise ValueError(
+            "You cannot specify both input_ids and inputs_embeds at the same time"
+        )
     elif input_ids is not None:
         batch_size, seq_length = input_ids.shape[:2]
     elif inputs_embeds is not None:
@@ -107,24 +118,30 @@ def LlamaModel_MixtureAttention_forward(
                 device=self.device,
                 dtype=self.dtype,
             )
-        past_key_values_length = past_key_values.get_seq_length() # noqa
+        past_key_values_length = past_key_values.get_seq_length()  # noqa
     ### end of perpare cache ###
 
     if position_ids is None:
         device = input_ids.device if input_ids is not None else inputs_embeds.device
         position_ids = torch.arange(
-            past_key_values_length, seq_length + past_key_values_length, dtype=torch.long, device=device
+            past_key_values_length,
+            seq_length + past_key_values_length,
+            dtype=torch.long,
+            device=device,
         )
         position_ids = position_ids.unsqueeze(0)
 
     if inputs_embeds is None:
         inputs_embeds = self.embed_tokens(input_ids)
 
-
     ### modification ###
-    attention_mask = attention_mask if (attention_mask is not None and 0 in attention_mask) else None # same as flash_attention2
+    attention_mask = (
+        attention_mask if (attention_mask is not None and 0 in attention_mask) else None
+    )  # same as flash_attention2
     if output_attentions:
-        raise NotImplementedError("output_attentions is not supported in mixture of attention")
+        raise NotImplementedError(
+            "output_attentions is not supported in mixture of attention"
+        )
     # embed positions
     hidden_states = inputs_embeds
     inputs_embeds = None
@@ -179,14 +196,18 @@ def LlamaModel_MixtureAttention_forward(
         next_cache = next_decoder_cache
         ### end of modification ###
     if not return_dict:
-        return tuple(v for v in [hidden_states, next_cache, all_hidden_states, all_self_attns] if v is not None)
+        return tuple(
+            v
+            for v in [hidden_states, next_cache, all_hidden_states, all_self_attns]
+            if v is not None
+        )
 
     ### only pass the hidden_states of last seq length
     # ! you can pass only the hidden_states of last seq length for better performance
     return BaseModelOutputWithPast(
         last_hidden_state=hidden_states,
-        ### use this to past only the hidden_states of last seq length
-        # last_hidden_state=hidden_states[:, -1:, :], 
+        ## use this to past only the hidden_states of last seq length
+        # last_hidden_state=hidden_states[:, -1:, :],
         past_key_values=next_cache,
         hidden_states=all_hidden_states,
         attentions=all_self_attns,
@@ -196,21 +217,27 @@ def LlamaModel_MixtureAttention_forward(
 
 class LlamaMixtureAttention(LlamaAttention):
     def forward(
-            self,
-            hidden_states: torch.Tensor,
-            attention_mask: Optional[torch.LongTensor] = None,
-            position_ids: Optional[torch.LongTensor] = None,
-            past_key_value: Optional[StaticCircularCache] = None,
-            output_attentions: bool = False,
-            use_cache: bool = False,
-            **kwargs,
-        ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.LongTensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_value: Optional[StaticCircularCache] = None,
+        output_attentions: bool = False,
+        use_cache: bool = False,
+        **kwargs,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
 
         ### begin modification ###
-        assert self.num_key_value_groups == 1, "only support one key value group now, but got {}".format(self.num_key_value_groups)
-        
+        assert (
+            self.num_key_value_groups == 1
+        ), "only support one key value group now, but got {}".format(
+            self.num_key_value_groups
+        )
+
         if output_attentions:
-            raise NotImplementedError("output_attentions is not supported in mixture of attention")
+            raise NotImplementedError(
+                "output_attentions is not supported in mixture of attention"
+            )
         ### end of modification ###
 
         bsz, q_len, _ = hidden_states.size()
@@ -219,15 +246,23 @@ class LlamaMixtureAttention(LlamaAttention):
         key_states = self.k_proj(hidden_states)
         value_states = self.v_proj(hidden_states)
 
-        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-        value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+        query_states = query_states.view(
+            bsz, q_len, self.num_heads, self.head_dim
+        ).transpose(1, 2)
+        key_states = key_states.view(
+            bsz, q_len, self.num_key_value_heads, self.head_dim
+        ).transpose(1, 2)
+        value_states = value_states.view(
+            bsz, q_len, self.num_key_value_heads, self.head_dim
+        ).transpose(1, 2)
 
         kv_seq_len = key_states.shape[-2]
         if past_key_value is not None:
             kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
         cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
+        query_states, key_states = apply_rotary_pos_emb(
+            query_states, key_states, cos, sin, position_ids
+        )
 
         ### begin modification ###
         if attention_mask is not None:
@@ -238,18 +273,22 @@ class LlamaMixtureAttention(LlamaAttention):
 
         if past_key_value is not None:
             cache_kwargs = {"sin": sin, "cos": cos}  # Specific to RoPE models
-            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, attention_mask, cache_kwargs)
+            key_states, value_states = past_key_value.update(
+                key_states, value_states, self.layer_idx, attention_mask, cache_kwargs
+            )
             if q_len == 1 and kv_seq_len > 1:
                 # update this_attention_mask during decode
-                this_attention_mask = past_key_value.mask_cache[self.layer_idx] if attention_mask is not None else None
+                this_attention_mask = (
+                    past_key_value.mask_cache[self.layer_idx]
+                    if attention_mask is not None
+                    else None
+                )
             else:
                 # TODO: support prefill with KV-cache
                 this_attention_mask = attention_mask
         else:
             this_attention_mask = attention_mask
         ### end of modification ###
-
-
 
         ### begin modification ###
         # the key and value states before past_key_value.update are tensors of shape (bsz, num_heads, q_len, head_dim); after updating:
@@ -261,11 +300,15 @@ class LlamaMixtureAttention(LlamaAttention):
             value_states = repeat_kv(value_states, self.num_key_value_groups)
 
         # Contiguous is necessary here because of the view call in the linear layers
-        if query_states.device.type == "cuda" and attention_mask is not None and isinstance(key_states, torch.Tensor):
+        if (
+            query_states.device.type == "cuda"
+            and attention_mask is not None
+            and isinstance(key_states, torch.Tensor)
+        ):
             query_states = query_states.contiguous()
             key_states = key_states.contiguous()
             value_states = value_states.contiguous()
-        ### end of modification ###        
+        ### end of modification ###
 
         ### begin modification ###
         assert self.training == False, "only support inference now"
@@ -277,7 +320,7 @@ class LlamaMixtureAttention(LlamaAttention):
             query_states,
             key_states,
             value_states,
-            sm_scale=self.head_dim ** -0.5,
+            sm_scale=self.head_dim**-0.5,
             head_index=head_index,
             attention_mask=this_attention_mask,
             attention_dropout=0.0,
@@ -291,33 +334,35 @@ class LlamaMixtureAttention(LlamaAttention):
 
 
 def LlamaModel_set_mixture_of_attention(
-        self, 
-        moa_config: Dict,
-        permute_head: bool = False,
-        sparse_prefill: bool = False, 
-        sparse_decode: bool = True,
-        device: Optional[str] = None, 
-    ):
+    self,
+    moa_config: Dict,
+    permute_head: bool = False,
+    sparse_prefill: bool = False,
+    sparse_decode: bool = True,
+    device: Optional[str] = None,
+):
     """
     Set the mixture of attention of the model
     """
     # update forward functions
-    self.forward = MethodType(LlamaModel_MixtureAttention_forward, self) # rename later
+    self.forward = MethodType(LlamaModel_MixtureAttention_forward, self)  # rename later
 
     # update functions in LlamaAttention
     for layer in self.layers:
-        layer.self_attn.forward = MethodType(LlamaMixtureAttention.forward, layer.self_attn)
+        layer.self_attn.forward = MethodType(
+            LlamaMixtureAttention.forward, layer.self_attn
+        )
 
-    alphas: Union[List[List[int]], List[Tensor]] = moa_config['alphas']
-    betas: Union[List[List[float]], List[Tensor]] = moa_config['betas']
+    alphas: Union[List[List[int]], List[Tensor]] = moa_config["alphas"]
+    betas: Union[List[List[float]], List[Tensor]] = moa_config["betas"]
     # block_size: int = moa_config['block_size']
 
     def permute_head_func(
-            self,
-            moa_config: Dict,
+        self,
+        moa_config: Dict,
     ):
-        alphas: Union[List[List[int]], List[Tensor]] = moa_config['alphas']
-        betas: Union[List[List[float]], List[Tensor]] = moa_config['betas']
+        alphas: Union[List[List[int]], List[Tensor]] = moa_config["alphas"]
+        betas: Union[List[List[float]], List[Tensor]] = moa_config["betas"]
 
         permutations, clusters = moa_config_to_permutation(moa_config)
         for layer_id, layer in enumerate(self.layers):
@@ -335,11 +380,11 @@ def LlamaModel_set_mixture_of_attention(
             permute_attention_projection(layer.self_attn.v_proj, permutation, num_heads)
             permute_output_projection(layer.self_attn.o_proj, permutation, num_heads)
 
-        moa_config['alphas'] = alphas
-        moa_config['betas'] = betas
+        moa_config["alphas"] = alphas
+        moa_config["betas"] = betas
 
     if permute_head:
-        permute_head_func(self, moa_config)        
+        permute_head_func(self, moa_config)
 
     self.use_moa = True
     self.moa_config = moa_config
