@@ -131,12 +131,12 @@ model_name = "lmsys/vicuna-7b-v1.5-16k"
 model = AutoModelForCausalLM.from_pretrained(model_name)
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 
-# Add sparse attention capability to the model by modifying the forward function
+moa_config_path = "examples/lmsys-vicuna-7b-v1.5-16k/moa_alpha_beta.json"
+with open(moa_config_path, 'r') as f:
+    moa_config = json.load(f)
+# Add mixture of sparse attention capability to the model
 model = update_model_function(model, model_name)
-model.model.use_block_sparse_attention_lut(permute_head=True, sparse_decode=True)
-
-# Load the plan at a specific length to the model
-set_static_attention_lut(path_to_lut, model_layers=model.model.layers, permute_head=True, sparse_decode=True)
+model.model.set_mixture_of_attention(moa_config, permute_head=True)
 
 # Now you can use the `model` for efficient inference like any regular huggingface model
 # For example, you can use it in pipeline to chat with the model

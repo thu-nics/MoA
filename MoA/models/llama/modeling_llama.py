@@ -227,7 +227,6 @@ class LlamaMixtureAttention(LlamaAttention):
         if past_key_value is not None:
             kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
         cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
-
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
 
         ### begin modification ###
@@ -242,7 +241,7 @@ class LlamaMixtureAttention(LlamaAttention):
             key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, attention_mask, cache_kwargs)
             if q_len == 1 and kv_seq_len > 1:
                 # update this_attention_mask during decode
-                this_attention_mask = past_key_value.mask_cache[self.layer_idx]
+                this_attention_mask = past_key_value.mask_cache[self.layer_idx] if attention_mask is not None else None
             else:
                 # TODO: support prefill with KV-cache
                 this_attention_mask = attention_mask
@@ -285,9 +284,7 @@ class LlamaMixtureAttention(LlamaAttention):
         )
         ### end modification ###
 
-        attn_output = attn_output.transpose(1, 2).contiguous()
-        attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
-
+        attn_output = attn_output.reshape(bsz, q_len, self.hidden_size).contiguous()
         attn_output = self.o_proj(attn_output)
 
         return attn_output, None, past_key_value
