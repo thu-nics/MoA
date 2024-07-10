@@ -14,6 +14,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 from typing import Dict, Tuple, Optional
+import json
 
 from MoA.models.interface import update_model_function
 from MoA.attention.set import set_static_attention_lut
@@ -109,6 +110,12 @@ if __name__ == "__main__":
         nargs="+",
         type=str,
         help="List of paths to load efficient attention lut",
+    )
+    parser.add_argument(
+        "--moa_config",
+        type=str,
+        default=None,
+        help="the path to moa configuration file",
     )
     parser.add_argument('--not_permute_head', action='store_true')
     parser.add_argument(
@@ -221,6 +228,14 @@ if __name__ == "__main__":
         set_static_attention_lut(
             args.lut_path, None, model.model.layers, block_size, permute_head, sparse_decode,
         )
+    
+    if args.moa_config is not None:
+        moa_config_path = args.moa_config
+        with open(moa_config_path, 'r') as f:
+            moa_config = json.load(f)
+        # Add mixture of sparse attention capability to the model
+        model = update_model_function(model, args.model_name)
+        model.model.set_mixture_of_attention(moa_config, permute_head=True)
 
     """
     evaluate

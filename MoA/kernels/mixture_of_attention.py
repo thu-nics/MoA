@@ -171,6 +171,7 @@ class _mixture_of_sparse_attention(torch.autograd.Function):
 
         # decode
         if _is_decode:
+            assert len(k.shape) == 3 and len(v.shape) == 3 # (Z, \sum_i^H N_CTX, L)
             # TODO: support contigious cache memory
             # split group and calculate for now, converting to [(Z, H, N_CTX, L)] * group for k and v
             k = StaticCircularCache.to_group_contigious(k, head_index)
