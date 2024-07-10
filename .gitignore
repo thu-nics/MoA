@@ -6,6 +6,7 @@
 # ignore model files
 *.bin
 *.pt
+*.csv
 
 # ignore installation files
 *.egg-info
