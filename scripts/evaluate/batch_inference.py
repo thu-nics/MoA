@@ -1,6 +1,7 @@
 import argparse
 import torch
 import functools
+import json
 from typing import List, Dict
 from tqdm import tqdm
 from torch.utils.data import DataLoader
@@ -19,6 +20,16 @@ from MoA.dataset.convert import multi_round_qa_to_multi_round_qa_model_by_batch
 import warnings
 warnings.filterwarnings("ignore")
 
+# Input args
+parser = argparse.ArgumentParser()
+parser.add_argument('--model_name', type=str, default='lmsys/vicuna-7b-v1.5-16k', help='model name')
+parser.add_argument('--moa_config', type=str, default=None, help='the path to moa configuration file')
+parser.add_argument('--batch_size', type=int, default=4, help='batch size')
+parser.add_argument('--max_new_tokens', type=int, default=512, help='max new tokens')
+parser.add_argument('--dataset_name', type=str, default='multi_news', help='dataset name')
+args = parser.parse_args()
+
+
 def batch_inference(model: AutoModelForCausalLM, tokenizer: AutoTokenizer, dataset: Dataset, batch_size: int, model_name: str, prompt_format: str = None, max_length: int = 16384, max_new_tokens: int = 256, verbose: bool = False):
 
     def collate_first_items_in_list(batch: List[Dict]):
@@ -36,7 +47,7 @@ def batch_inference(model: AutoModelForCausalLM, tokenizer: AutoTokenizer, datas
     
     progress_bar = tqdm(data_loader, desc="Batch Inference", total=len(data_loader))
 
-    for batch in data_loader:
+    for i, batch in enumerate(data_loader):
         progress_bar.update(1)
 
         context_batch: list = batch["context"]
@@ -72,7 +83,8 @@ def batch_inference(model: AutoModelForCausalLM, tokenizer: AutoTokenizer, datas
         if max(input_lengths) > max_length:
             break
 
-        try:
+        # try:
+        if True:
             # Generate the user input and model response
             model_responses = model.generate(
                 **model_input,
@@ -86,9 +98,9 @@ def batch_inference(model: AutoModelForCausalLM, tokenizer: AutoTokenizer, datas
             model_responses = model_responses[..., model_input.input_ids.shape[-1]:] # left padding
             model_response_lengths = torch.sum(model_responses!=tokenizer.pad_token_id, dim=-1)
             model_responses = tokenizer.batch_decode(model_responses,  skip_special_tokens=True)
-        except Exception as e:
-            print(e)
-            model_responses = [""] * len(model_input)
+        # except Exception as e:
+        #     print(e)
+        #     model_responses = [""] * len(model_input)
 
         if verbose:
             for question, answer in zip(question_batch, model_responses):
@@ -106,34 +118,24 @@ def batch_inference(model: AutoModelForCausalLM, tokenizer: AutoTokenizer, datas
     
 
 if __name__ == "__main__":
-    # Input args
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--model_name', type=str, default='lmsys/vicuna-7b-v1.5-16k', help='model name')
-    parser.add_argument('--lut_path', type=str, nargs='+', help='a list of lut path')
-    parser.add_argument('--batch_size', type=int, default=2, help='batch size')
-    parser.add_argument('--max_new_tokens', type=int, default=4096, help='max new tokens')
-    args = parser.parse_args()
-
     # Load the huggingface model
     model_name = args.model_name
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    # attention_implementation = "eager" if args.lut_path is not None else "sdpa" # use flashAttention if MoA is not set
-    attention_implementation = "sdpa"
-    model = AutoModelForCausalLM.from_pretrained(model_name, device_map="cuda", _attn_implementation = attention_implementation, _attn_implementation_internal = attention_implementation, torch_dtype=torch.float16)
+    model = AutoModelForCausalLM.from_pretrained(model_name, device_map="cuda", torch_dtype=torch.float16)
     tokenizer = AutoTokenizer.from_pretrained(model_name, padding_side='left', trust_remote_code=True)
 
-    if args.lut_path is not None:
-        # Add sparse attention capability to the model by modifying the forward function
+    if args.moa_config is not None:
+        moa_config_path = args.moa_config
+        with open(moa_config_path, 'r') as f:
+            moa_config = json.load(f)
+        # Add mixture of sparse attention capability to the model
         model = update_model_function(model, model_name)
-        model.model.use_block_sparse_attention_lut(permute_head=True, sparse_decode=True)
-
-        # Load the plan at a specific length to the model
-        set_static_attention_lut(args.lut_path, model_layers=model.model.layers, permute_head=True, sparse_decode=True)
+        model.model.set_mixture_of_attention(moa_config, permute_head=True)
 
     # Batch Inference
     huggingface_dataset_path = "nics-efc/MoA_Long_HumanQA"
-    dataset_name_short = "multi_news"
-    max_dataitem = 16
+    dataset_name_short = args.dataset_name
+    max_dataitem = 8
 
     batch_size = args.batch_size
 
@@ -144,17 +146,6 @@ if __name__ == "__main__":
     answer_format = df[df["dataset_names"] == dataset_name_short]["answer_format"].values[0]
 
     multi_round_qa_dataset = load_dataset(huggingface_dataset_path)["train"].filter(lambda x: x["dataset"] == dataset_name_short).filter(lambda x: x["total_length_level"] <= 8).select(range(max_dataitem))
-
-    # get_model_response = functools.partial(
-    #     multi_round_qa_to_multi_round_qa_model_by_batch,
-    #     model=model,
-    #     model_name=args.model_name,
-    #     tokenizer=tokenizer,
-    #     prompt_format=prompt_format,
-    #     max_length=16384,
-    #     batch_size=batch_size,
-    # )
-    # multi_round_qa_dataset = multi_round_qa_dataset.map(get_model_response)
 
     with torch.no_grad():
         batch_inference(model, tokenizer, multi_round_qa_dataset, batch_size, model_name, prompt_format, max_length=16384, max_new_tokens=args.max_new_tokens, verbose=True)

@@ -13,8 +13,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig
 
 import json
 
-from MoA.models.llama.modeling_llama import LlamaModel_use_block_sparse_attention_lut
-from MoA.attention.set import set_static_attention_lut
+from MoA.models.interface import update_model_function
 
 # !!! remember to calculate only the last logit for lm_head when doing efficiency test.
 # !!! to do this, refer to the return value of LlamaModel_block_sparse_lut_forward function in MoA/models/llama/modeling_llama.py. The same can be done to LlamaModel.forward in the transformers library.
@@ -35,15 +34,16 @@ TIME_FORMAT_STR: str = "%b_%d_%H_%M_%S"
 MAX_NUM_OF_MEM_EVENTS_PER_SNAPSHOT: int = 100000
 
 parser = argparse.ArgumentParser()
+parser.add_argument('--prefill_len', type=int, required=True)
+
+
 parser.add_argument('--model_name', type=str, default='lmsys/vicuna-7b-v1.5-16k', help='model name')
 parser.add_argument('--dtype', choices=['fp32', 'fp16', 'bf16'], default='fp16')
-parser.add_argument('--lut_path', type=str, nargs='+', help='a list of lut path',)
+parser.add_argument('--moa_config', type=str, default=None, help='the path to moa configuration file')
 parser.add_argument('--num_iters', type=int, default=1)
-parser.add_argument('--block_size', type=int, default=64)
 parser.add_argument('--batch_size', type=int, default=1)
-parser.add_argument('--prefill_len', type=int, required=True)
 parser.add_argument('--decode_len', type=int, default=None, help='decoding max len. if None, just do prefilling')
-parser.add_argument('--attention_implementation', type=str, default='eager')
+parser.add_argument('--attention_implementation', type=str, default='sdpa')
 parser.add_argument('--profiler', action='store_true')
 parser.add_argument('--cuda_event', action='store_true')
 parser.add_argument('--cuda_cache', action="store_true")
@@ -134,13 +134,13 @@ def run_model(num_iters=5, device="cuda:0"):
     for name, param in model.named_parameters():
         param.requires_grad = False
 
-    if args.lut_path is not None:
-        assert args.attention_implementation == "eager" or args.attention_implementation == "sdpa"
-        print("Using lut from {}, with block size {}".format(args.lut_path, args.block_size))
-
-        model.model.use_block_sparse_attention_lut = LlamaModel_use_block_sparse_attention_lut.__get__(model.model)
-        model.model.use_block_sparse_attention_lut(permute_head=True, sparse_decode=True)
-        set_static_attention_lut(args.lut_path, None, model.model.layers, args.block_size, permute_head=True, sparse_decode=True)
+    if args.moa_config is not None:
+        moa_config_path = args.moa_config
+        with open(moa_config_path, 'r') as f:
+            moa_config = json.load(f)
+        # Add mixture of sparse attention capability to the model
+        model = update_model_function(model, args.model_name)
+        model.model.set_mixture_of_attention(moa_config, permute_head=True)
 
     test_file = 'data/70_lines.jsonl'
     with open(test_file, 'r') as f:
