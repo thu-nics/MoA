@@ -33,8 +33,8 @@ def _sparse_attention_prefill_fwd_kernel(
     BLOCK_M: tl.constexpr, BLOCK_DMODEL: tl.constexpr,
     BLOCK_N: tl.constexpr,
 ):
-    start_m = tl.program_id(0)
-    off_hz = tl.program_id(1)
+    start_m = tl.program_id(0) # block id x
+    off_hz = tl.program_id(1) # block id y
     lut_indicator = tl.program_id(1) % H
     qvk_offset = off_hz * stride_qh
     lut_offset = lut_indicator * stride_lz
