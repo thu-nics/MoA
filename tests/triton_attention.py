@@ -51,7 +51,7 @@ def _attn_fwd_inner(acc, l_i, m_i, q,  #
         # -- update output accumulator --
         acc = acc * alpha[:, None]
         # update acc
-        v = tl.load(V_block_ptr)
+        v = tl.load(V_block_ptr, boundary_check=(0, 1), padding_option="zero") # make sure that the last block is padded with zeros
         p = p.to(tl.float16)
         acc = tl.dot(p, v, acc)
         # update m_i and l_i
@@ -145,7 +145,8 @@ def _attn_fwd(Q, K, V, sm_scale, M, Out,  #
     qk_scale = sm_scale
     qk_scale *= 1.44269504  # 1/log(2)
     # load q: it will stay in SRAM throughout
-    q = tl.load(Q_block_ptr)
+    q = tl.load(Q_block_ptr, boundary_check=(0, 1), padding_option="zero") # skip boundary_check and do it in qk -> p
+
     # stage 1: off-band
     # For causal = True, STAGE = 3 and _attn_fwd_inner gets 1 as its STAGE
     # For causal = False, STAGE = 1, and _attn_fwd_inner gets 3 as its STAGE
@@ -168,8 +169,8 @@ def _attn_fwd(Q, K, V, sm_scale, M, Out,  #
     m_i += tl.math.log2(l_i)
     acc = acc / l_i[:, None]
     m_ptrs = M + off_hz * N_CTX + offs_m
-    tl.store(m_ptrs, m_i)
-    tl.store(O_block_ptr, acc.to(Out.type.element_ty))
+    tl.store(m_ptrs, m_i, boundary_check=(0))
+    tl.store(O_block_ptr, acc.to(Out.type.element_ty), boundary_check=(0, 1))
 
 
 class _attention(torch.autograd.Function):
@@ -215,7 +216,7 @@ class _attention(torch.autograd.Function):
 attention = _attention.apply
 
 
-@pytest.mark.parametrize("Z, H, N_CTX, HEAD_DIM", [(1, 2, 1023, 64)])
+@pytest.mark.parametrize("Z, H, N_CTX, HEAD_DIM", [(1, 2, 1, 64)])
 @pytest.mark.parametrize("causal", [True])
 def test_op(Z, H, N_CTX, HEAD_DIM, causal, dtype=torch.float16):
     torch.manual_seed(20)
@@ -265,6 +266,7 @@ for mode in ["fwd"]:
                 plot_name=f"fused-attention-batch{BATCH}-head{N_HEADS}-d{HEAD_DIM}-{mode}-causal={causal}",
                 args={
                     "H": N_HEADS,
+                    "Q_LEN": 1,
                     "BATCH": BATCH,
                     "HEAD_DIM": HEAD_DIM,
                     "mode": mode,
@@ -275,13 +277,13 @@ for mode in ["fwd"]:
 
 
 @triton.testing.perf_report(configs)
-def bench_flash_attention(BATCH, H, N_CTX, HEAD_DIM, causal, mode, provider, device="cuda"):
+def bench_flash_attention(BATCH, H, N_CTX, Q_LEN, HEAD_DIM, causal, mode, provider, device="cuda"):
     assert mode in ["fwd", "bwd"]
     warmup = 25
     rep = 100
     dtype = torch.float16
     if "triton" in provider:
-        q = torch.randn((BATCH, H, N_CTX, HEAD_DIM), dtype=dtype, device=device, requires_grad=True)
+        q = torch.randn((BATCH, H, Q_LEN, HEAD_DIM), dtype=dtype, device=device, requires_grad=True)
         k = torch.randn((BATCH, H, N_CTX, HEAD_DIM), dtype=dtype, device=device, requires_grad=True)
         v = torch.randn((BATCH, H, N_CTX, HEAD_DIM), dtype=dtype, device=device, requires_grad=True)
         sm_scale = 1.3
