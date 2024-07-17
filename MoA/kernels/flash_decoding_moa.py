@@ -98,14 +98,15 @@ def _attn_fwd_inner(
 
 
 @triton.jit
-def _moa_decode_split_fwd(
-    Q: tl.tensor, K: tl.tensor, V: tl.tensor, Out: tl.tensor, L: tl.tensor, 
-    Split_Index: tl.tensor, sm_scale: float,
+def _moa_flash_decode_split_fwd_stage1(
+    Q: tl.tensor, K: tl.tensor, V: tl.tensor, Out: tl.tensor, 
+    L: tl.tensor, M: tl.tensor,
+    Head_Index: tl.tensor, sm_scale: float,
     stride_qz: int, stride_qh: int, stride_qm: int, stride_qk: int,
     stride_kz: int, stride_khn: int, stride_kk: int,
-    stride_vz: int, stride_vhn: int, stride_vn: int,
-    stride_oz: int, stride_oh: int, stride_om: int, stride_on: int,
-    stride_lz: int, stride_lhn: int, stride_lm: int,
+    stride_vz: int, stride_vhn: int, stride_vk: int,
+    stride_oz: int, stride_os: int, stride_om: int, stride_ok: int,
+    stride_lz: int, stride_ls: int, stride_lm: int,
     Z: int, H: int, N_Q: int, N_CTX_H: int,
     HEAD_DIM: tl.constexpr, BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, KV_SPLIT_SIZE: tl.constexpr, STAGE: tl.constexpr
 ) -> None:
@@ -114,10 +115,10 @@ def _moa_decode_split_fwd(
 
     Parameters:
     - Q, K, V (tl.tensor): Query, Key, and Value tensors. For query, the input length should be 1
-    - Split_Index (tl.tensor): The i-th number of split index is the head index of split i
+    - Head_Index (tl.tensor): The i-th number of split index to the head index of split i
     - sm_scale (float): Scale for softmax calculation.
     - M (tl.tensor): Tensor to store intermediate maximum values for softmax stability.
-    - Out (tl.tensor): Output tensor.
+    - Out (tl.tensor): Output tensor. The shape is (Z, H, S, N_IN, L).
     - stride_* (int): Strides for different dimensions of Q, K, V, and Out tensors.
     - Z, H, N_Q (int): Dimensions for batch, number of heads, query length.
     - N_CTX_H (int): Dimension for \sum_{h=0}^{H-1} N_CTX_h
@@ -133,55 +134,44 @@ def _moa_decode_split_fwd(
     batch_id = tl.program_id(0)
     split_id = tl.program_id(1)
 
-    head_id = tl.load(Split_Index + split_id).to(tl.int64)
+    head_id = tl.load(Head_Index + split_id).to(tl.int64)
 
     # pointer to batch
     q_offset = batch_id * stride_qz.to(tl.int64) + head_id * stride_qh.to(tl.int64)
     kv_offset = batch_id * stride_kz.to(tl.int64)
-    o_offset = q_offset
-
-    # pointer to vec
-    l_offset = batch_id * stride_lz.to(tl.int64) + split_id * stride_lhn.to(tl.int64)
-
-    # block pointers
+    o_offset = batch_id * stride_oz.to(tl.int64) + split_id * stride_os.to(tl.int64)
+    
+    # block pointers 
     Q_block_ptr = tl.make_block_ptr(
         base=Q + q_offset,
         shape=(N_Q, HEAD_DIM),
         strides=(stride_qm, stride_qk),
         offsets=(0, 0),
-        block_shape=(N_Q, HEAD_DIM),
+        block_shape=(BLOCK_M, HEAD_DIM),
         order=(1, 0),
     )
     V_block_ptr = tl.make_block_ptr(
         base=V + kv_offset,
-        shape=(KV_SPLIT_SIZE, HEAD_DIM),
-        strides=(stride_vhn, stride_vn),
-        offsets=(0, 0),
+        shape=(N_CTX_H, HEAD_DIM),
+        strides=(stride_vhn, stride_vk),
+        offsets=(split_id * KV_SPLIT_SIZE, 0),
         block_shape=(BLOCK_N, HEAD_DIM),
         order=(1, 0),
     )
     K_block_ptr = tl.make_block_ptr(
         base=K + kv_offset,
-        shape=(HEAD_DIM, KV_SPLIT_SIZE),
+        shape=(HEAD_DIM, N_CTX_H),
         strides=(stride_kk, stride_khn),
-        offsets=(0, 0),
+        offsets=(0, split_id * KV_SPLIT_SIZE),
         block_shape=(HEAD_DIM, BLOCK_N),
         order=(0, 1),
     )
     O_block_ptr = tl.make_block_ptr(
         base=Out + o_offset,
         shape=(N_Q, HEAD_DIM),
-        strides=(stride_om, stride_on),
+        strides=(stride_om, stride_ok),
         offsets=(0, 0),
         block_shape=(BLOCK_M, HEAD_DIM),
-        order=(1, 0),
-    )
-    L_block_ptr = tl.make_block_ptr(
-        base=L + l_offset,
-        shape=(1, N_Q),
-        strides=(stride_lhn, stride_lm),
-        offsets=(0, 0),
-        block_shape=(1, N_Q),
         order=(1, 0),
     )
 
@@ -191,7 +181,7 @@ def _moa_decode_split_fwd(
 
     # initialize pointer to m and l
     m_i = tl.zeros([BLOCK_M], dtype=tl.float32) - float("inf")
-    l_i = tl.zeros([1, BLOCK_M], dtype=tl.float32) + 1.0
+    l_i = tl.zeros([BLOCK_M], dtype=tl.float32) + 1.0
     acc = tl.zeros([BLOCK_M, HEAD_DIM], dtype=tl.float32)
 
     # load scales
@@ -216,8 +206,16 @@ def _moa_decode_split_fwd(
 
     # write output
     tl.store(O_block_ptr, acc.to(Out.type.element_ty), boundary_check=(0, 1))
-    tl.store(L_block_ptr, l_i, boundary_check=(0, 1))
+    # store l and m, where 
+    # m = max(s) = max(q * k.T)
+    # l = sum(exp(q * k.T - m))
+    lm_mask = (tl.arange(0, BLOCK_M) < N_Q)
+    lm_offset = batch_id * stride_lz + split_id * stride_ls + tl.arange(0, BLOCK_M) * stride_lm
+    l_ptr = L + lm_offset
+    m_ptr = M + lm_offset
 
+    tl.store(l_ptr, l_i, mask = lm_mask)
+    tl.store(m_ptr, m_i, mask = lm_mask)
 
 class _mixture_of_sparse_attention_decode(torch.autograd.Function):
     """
@@ -240,7 +238,7 @@ class _mixture_of_sparse_attention_decode(torch.autograd.Function):
         head_index: Tensor, 
         sm_scale: float, 
         causal: bool,
-    ):
+    ) -> Tensor:
         # shape constraints
         HEAD_DIM_Q, HEAD_DIM_K = q.shape[-1], k.shape[-1]
         HEAD_DIM_V = v.shape[-1]
@@ -253,17 +251,18 @@ class _mixture_of_sparse_attention_decode(torch.autograd.Function):
         assert HEAD_DIM in {16, 32, 64, 128, 256}
 
 
-        KV_SPLIT_SIZE = 256 # 16 * 16
+        KV_SPLIT_SIZE = 32 # 16 * 2
         CTX_HEAD_SIZE = k.shape[1]
         KV_SPLIT_NUM = triton.cdiv(CTX_HEAD_SIZE, KV_SPLIT_SIZE) # noqa: assume each head can be divided by KV_SPLIT_SIZE
         
 
         # prepare output
-        o = torch.empty_like(q)
-        l = torch.empty((BATCH_SIZE, KV_SPLIT_NUM, QUERY_SIZE), dtype=q.dtype, device=q.device)
+        o = torch.empty((BATCH_SIZE, KV_SPLIT_NUM, QUERY_SIZE, HEAD_DIM), dtype=q.dtype, device=q.device) # shape (Z, H, SPLIT, N_IN, L)
+        l = torch.empty((BATCH_SIZE, KV_SPLIT_NUM, QUERY_SIZE), dtype=torch.float32, device=q.device)
+        m = torch.empty((BATCH_SIZE, KV_SPLIT_NUM, QUERY_SIZE), dtype=torch.float32, device=q.device)
 
         # prepare index
-        split_index = head_index_to_split_index(head_index, KV_SPLIT_SIZE)
+        split_to_head_index = head_index_to_split_index(head_index, KV_SPLIT_SIZE)
 
         # stage = 3 if causal else 1
         stage = 1 # noqa: multiply with all inputs
@@ -271,12 +270,13 @@ class _mixture_of_sparse_attention_decode(torch.autograd.Function):
 
         # get grid parameters
         grid = (BATCH_SIZE, KV_SPLIT_NUM, 1)
-        _moa_decode_split_fwd[grid](
-            q, k, v, o, l, #
-            split_index, sm_scale,  #
+        _moa_flash_decode_split_fwd_stage1[grid](
+            q, k, v, o,  # 
+            l, m,  #
+            split_to_head_index, sm_scale,  #
             q.stride(0), q.stride(1), q.stride(2), q.stride(3),  #
-            k.stride(0), k.stride(1), k.stride(-1),  #
-            v.stride(0), v.stride(1), v.stride(-1),  #
+            k.stride(0), k.stride(1), k.stride(2),  #
+            v.stride(0), v.stride(1), v.stride(2),  #
             o.stride(0), o.stride(1), o.stride(2), o.stride(3),  #
             l.stride(0), l.stride(1), l.stride(2),
             BATCH_SIZE, NUM_HEAD, QUERY_SIZE, CTX_HEAD_SIZE, 
@@ -284,15 +284,52 @@ class _mixture_of_sparse_attention_decode(torch.autograd.Function):
             **extra_kern_args,
         )
         
-        return o
+        # flash decoding merge intermediate results
+        o = _flash_decode_split_fwd_stage2(o, l, m, split_to_head_index) # output shape (Z, H, N_IN, L)
+
+        return o.to(q.dtype)
+
+def _flash_decode_split_fwd_stage2(MID_O, MID_L, MID_M, split_to_head_index):
+    """
+    Perform the stage of the flash decoding mechanism.
+
+    Parameters:
+    - MID_O (Tensor): Intermediate output tensor, each computed with local softmax. Shape: (batch_size, num_splits, query_size, head_dim).
+    - MID_L (Tensor): sum of exponentials of the max-subtracted logits. Shape: (batch_size, num_splits, query_size).
+    - MID_M (Tensor): Maximum logit observed so far (for stability in softmax). Shape: (batch_size, num_splits, query_size).
+    - split_to_head_index (Tensor): The i-th number of split index is the head index of this split. Shape: (num_splits).
+
+    Returns:
+    - Tensor: Output tensor. Shape: (batch_size, num_heads, query_size, head_dim).
+    """
+    batch_size, num_splits, query_size, head_dim = MID_O.shape
+    num_heads = torch.max(split_to_head_index) + 1
+
+    M = torch.max(MID_M, dim=1).values # (batch_size, query_size)
+    alpha = torch.exp(MID_M - M[:, None, :])  # (batch_size, num_splits, query_size)
+    
+    # Scatter L to shape (batch_size, num_heads, query_size)
+    L_FOR_SUM = alpha * MID_L  # (batch_size, num_splits, query_size)
+    L = torch.zeros(batch_size, num_heads, query_size, device=MID_O.device)
+    L_scatter_index = split_to_head_index.view(1, num_splits, 1).expand([batch_size, -1, query_size])
+    L = L.scatter_add(1, L_scatter_index, L_FOR_SUM) # shape (batch_size, num_heads, query_size)
+
+    # Initialize an empty tensor for output
+    O = torch.zeros(batch_size, num_heads, query_size, head_dim, device=MID_O.device)
+    output_scatter_index = split_to_head_index.view(1, num_splits, 1, 1).expand([batch_size, -1, query_size, head_dim])
+    O = O.scatter_add(1, output_scatter_index, MID_O * L_FOR_SUM[:, :, :, None])
+    O = O / L[:, :, :, None]  # (batch_size, num_head, query_size, head_dim)
+
+    return O
+
 
 def head_index_to_split_index(head_index: torch.Tensor, split_size: int) -> Tensor:
     """
-    Convert head index to split index.
+    Convert head index to split index. Each split can only corresponds to one head. But one head can corresponds to multiple splits.
 
     Parameters:
     - head_index (torch.Tensor): Head index tensor, shape (num_head+1). The i-th value is the start index of the i-th head.
-    - split_size (int): Size of each split.
+    - split_size (int): Size of each split. 
 
     Returns:
     - Tensor: Split to head index tensor, shape (num_split).  The i-th number of split index is the index of the head the split is in.
@@ -304,7 +341,7 @@ def head_index_to_split_index(head_index: torch.Tensor, split_size: int) -> Tens
     num_splits = (total_length + split_size - 1) // split_size
 
     # Initialize the tensor that will hold the split to head index mapping
-    split_to_head_index = torch.empty(num_splits, dtype=torch.long)
+    split_to_head_index = torch.empty(num_splits, dtype=torch.long, device=head_index.device)
 
     # Iterate through each head
     num_heads = len(head_index) - 1
@@ -322,101 +359,3 @@ def head_index_to_split_index(head_index: torch.Tensor, split_size: int) -> Tens
 
     return split_to_head_index
     
-
-
-@pytest.mark.parametrize("Z, H, N_CTX, HEAD_DIM", [(1, 16, 1, 64)])
-@pytest.mark.parametrize("causal", [True])
-def test_op(Z, H, N_CTX, HEAD_DIM, causal, dtype=torch.float16):
-    torch.manual_seed(20)
-    q = (torch.empty((Z, H, N_CTX, HEAD_DIM), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
-    k = (torch.empty((Z, H, N_CTX, HEAD_DIM), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
-    v = (torch.empty((Z, H, N_CTX, HEAD_DIM), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
-    sm_scale = 0.5
-    dout = torch.randn_like(q)
-    # reference implementation
-    M = torch.tril(torch.ones((N_CTX, N_CTX), device="cuda"))
-    p = torch.matmul(q, k.transpose(2, 3)) * sm_scale
-    if causal:
-        p[:, :, M == 0] = float("-inf")
-    p = torch.softmax(p.float(), dim=-1).half()
-    # p = torch.exp(p)
-    ref_out = torch.matmul(p, v)
-    # triton implementation
-    tri_out = attention(q, k, v, causal, sm_scale).half()
-    # compare
-    assert torch.allclose(ref_out, tri_out, atol=1e-2, rtol=0)
-    rtol = 0.0
-
-
-try:
-    from flash_attn.flash_attn_interface import \
-        flash_attn_qkvpacked_func as flash_attn_func
-    HAS_FLASH = True
-except BaseException:
-    HAS_FLASH = False
-
-BATCH, N_HEADS, HEAD_DIM = 4, 32, 64
-# vary seq length for fixed head and batch=4
-configs = []
-for mode in ["fwd"]:
-    for causal in [True]:
-        configs.append(
-            triton.testing.Benchmark(
-                x_names=["N_CTX"],
-                x_vals=[2**i for i in range(10, 15)],
-                line_arg="provider",
-                line_vals=["triton-fp16"] +
-                (["flash"] if HAS_FLASH else []),
-                line_names=["Triton [FP16]"] +
-                (["Flash-2"] if HAS_FLASH else []),
-                styles=[("red", "-"), ("blue", "-"), ("green", "-")],
-                ylabel="ms",
-                plot_name=f"fused-attention-batch{BATCH}-head{N_HEADS}-d{HEAD_DIM}-{mode}-causal={causal}",
-                args={
-                    "H": N_HEADS,
-                    "Q_LEN": 1,
-                    "BATCH": BATCH,
-                    "HEAD_DIM": HEAD_DIM,
-                    "mode": mode,
-                    "causal": causal,
-                },
-            ))
-
-
-@triton.testing.perf_report(configs)
-def bench_flash_attention(BATCH, H, N_CTX, Q_LEN, HEAD_DIM, causal, mode, provider, device="cuda"):
-    assert mode in ["fwd", "bwd"]
-    warmup = 25
-    rep = 100
-    dtype = torch.float16
-    if "triton" in provider:
-        q = torch.randn((BATCH, H, Q_LEN, HEAD_DIM), dtype=dtype, device=device, requires_grad=True)
-        k = torch.randn((BATCH, H, N_CTX, HEAD_DIM), dtype=dtype, device=device, requires_grad=True)
-        v = torch.randn((BATCH, H, N_CTX, HEAD_DIM), dtype=dtype, device=device, requires_grad=True)
-        sm_scale = 1.3
-        fn = lambda: attention(q, k, v, causal, sm_scale)
-        if mode == "bwd":
-            o = fn()
-            do = torch.randn_like(o)
-            fn = lambda: o.backward(do, retain_graph=True)
-        ms = triton.testing.do_bench(fn, warmup=warmup, rep=rep)
-    if provider == "flash":
-        qkv = torch.randn((BATCH, N_CTX, 3, H, HEAD_DIM), dtype=dtype, device=device, requires_grad=True)
-        fn = lambda: flash_attn_func(qkv, causal=causal)
-        if mode == "bwd":
-            o = fn()
-            do = torch.randn_like(o)
-            fn = lambda: o.backward(do, retain_graph=True)
-        ms = triton.testing.do_bench(fn, warmup=warmup, rep=rep)
-    flops_per_matmul = 2.0 * BATCH * H * N_CTX * N_CTX * HEAD_DIM
-    total_flops = 2 * flops_per_matmul
-    if causal:
-        total_flops *= 0.5
-    if mode == "bwd":
-        total_flops *= 2.5  # 2.0(bwd) + 0.5(recompute)
-    return total_flops / ms * 1e-9
-
-
-if __name__ == "__main__":
-    # only works on post-Ampere GPUs right now
-    bench_flash_attention.run(save_path=".", print_data=True)

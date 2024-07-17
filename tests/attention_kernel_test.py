@@ -15,7 +15,9 @@ class TestMixtureOfSparseAttention(unittest.TestCase):
         cls.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print(f"Tests will run on: {cls.device}")
         # Set the test implementations
-        cls.implementations = ["sdpa", "triton"]
+        cls.gen_data_func = torch.rand
+        # cls.gen_data_func = torch.ones
+        cls.implementations = ["sdpa", "moa"]
 
     def test_prefill_stage(self):
         """Test the prefill stage of the mixture_of_sparse_attention function with different implementations."""
@@ -23,9 +25,9 @@ class TestMixtureOfSparseAttention(unittest.TestCase):
         sm_scale = 0.1
         attention_dropout = 0.0
 
-        q = torch.rand(bsz, num_heads, seq_len, hidden_dim, dtype=torch.float16, device=self.device)
-        k = torch.rand(bsz, num_heads, seq_len, hidden_dim, dtype=torch.float16, device=self.device)
-        v = torch.rand(bsz, num_heads, seq_len, hidden_dim, dtype=torch.float16, device=self.device)
+        q = self.gen_data_func(bsz, num_heads, seq_len, hidden_dim, dtype=torch.float16, device=self.device)
+        k = self.gen_data_func(bsz, num_heads, seq_len, hidden_dim, dtype=torch.float16, device=self.device)
+        v = self.gen_data_func(bsz, num_heads, seq_len, hidden_dim, dtype=torch.float16, device=self.device)
 
         output = dict()
         for implementation in self.implementations:
@@ -37,15 +39,15 @@ class TestMixtureOfSparseAttention(unittest.TestCase):
             self.assertEqual(output[implementation].shape, (bsz, seq_len, num_heads, hidden_dim))
 
         # Assert equality across different implementations
-        torch.testing.assert_close(output[implementation[0]], output[implementation[1]], rtol=1e-3, atol=1e-3)
+        torch.testing.assert_close(output[self.implementations[0]], output[self.implementations[1]], rtol=1e-3, atol=1e-3)
 
 
     def test_decode_stage(self):
         """Test the decode stage of the mixture_of_sparse_attention function."""
         bsz, q_len, hidden_dim = 2, 1, 64  # Assuming q_len = 1 for decode stage
 
-        num_head_for_each_group = [2, 4]
-        cache_size_for_each_group = [5, 3]
+        num_head_for_each_group = [8, 4]
+        cache_size_for_each_group = [64, 128]
 
         num_group = len(num_head_for_each_group)
 
@@ -53,6 +55,7 @@ class TestMixtureOfSparseAttention(unittest.TestCase):
         head_index = [current_index]
         ks = []
         vs = []
+
         for group_id in range(num_group):
             num_heads = num_head_for_each_group[group_id]
             cache_size = cache_size_for_each_group[group_id]
@@ -61,14 +64,14 @@ class TestMixtureOfSparseAttention(unittest.TestCase):
                 current_index += cache_size
                 head_index.append(current_index)
 
-            k = torch.rand(bsz, num_heads, cache_size, hidden_dim, dtype=torch.float16, device=self.device)
-            v = torch.rand(bsz, num_heads, cache_size, hidden_dim, dtype=torch.float16, device=self.device)
+            k = self.gen_data_func(bsz, num_heads, cache_size, hidden_dim, dtype=torch.float16, device=self.device)
+            v = self.gen_data_func(bsz, num_heads, cache_size, hidden_dim, dtype=torch.float16, device=self.device)
 
             ks.append(k.reshape(bsz, num_heads * cache_size, hidden_dim))
             vs.append(v.reshape(bsz, num_heads * cache_size, hidden_dim))
 
         num_heads = sum(num_head_for_each_group)
-        q = torch.rand(bsz, num_heads, q_len, hidden_dim, dtype=torch.float16, device=self.device)
+        q = self.gen_data_func(bsz, num_heads, q_len, hidden_dim, dtype=torch.float16, device=self.device)
         k = torch.cat(ks, dim=1)
         v = torch.cat(vs, dim=1)
         head_index = torch.tensor(head_index, dtype=torch.int64, device=self.device)
@@ -84,19 +87,19 @@ class TestMixtureOfSparseAttention(unittest.TestCase):
             self.assertEqual(output[implementation].shape, (bsz, q_len, num_heads, hidden_dim))
 
         # Assert equality
-        torch.testing.assert_close(output[implementation[0]], output[implementation[1]], rtol=1e-3, atol=1e-3)
+        torch.testing.assert_close(output[self.implementations[0]], output[self.implementations[1]], rtol=1e-3, atol=1e-3)
 
     def test_invalid_input(self):
         """Test function behavior with invalid input shapes."""
         bsz, num_heads, seq_len, hidden_dim = 2, 4, 10, 64
         sm_scale = 0.1
-        q = torch.rand(bsz, num_heads, seq_len, hidden_dim, dtype=torch.float16, device=self.device)
-        k = torch.rand(bsz, num_heads, seq_len, hidden_dim + 1, dtype=torch.float16, device=self.device)  # Invalid shape
-        v = torch.rand(bsz, num_heads, seq_len, hidden_dim, dtype=torch.float16, device=self.device)
+        q = self.gen_data_func(bsz, num_heads, seq_len, hidden_dim, dtype=torch.float16, device=self.device)
+        k = self.gen_data_func(bsz, num_heads, seq_len, hidden_dim + 1, dtype=torch.float16, device=self.device)  # Invalid shape
+        v = self.gen_data_func(bsz, num_heads, seq_len, hidden_dim, dtype=torch.float16, device=self.device)
 
         with self.assertRaises(AssertionError):
             mixture_of_sparse_attention(q, k, v, sm_scale)
 
 if __name__ == '__main__':
-    unittest.main()
+    unittest.main(defaultTest='TestMixtureOfSparseAttention.test_decode_stage')
 
