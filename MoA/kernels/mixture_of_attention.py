@@ -356,7 +356,7 @@ def mixture_of_sparse_attention(
     head_index=None,
     attention_mask=None,
     attention_dropout=0.0,
-    implementation="sdpa",
+    implementation="moa",
 ):
     """
     Wrapper for the Triton implementation of the Mixture of Sparse Attention (MoA) kernel to support keyword arguments.
@@ -364,9 +364,12 @@ def mixture_of_sparse_attention(
     # TODO: support contigious cache memory
     causal = True
 
-    if implementation in ["sdpa", "flash_attention2", "triton"]:
+    is_prefill = not (key.shape[-2] > query.shape[-2])
+    implementation = "sdpa" if (implementation == "moa" and is_prefill) else implementation
+
+    if implementation in ["sdpa", "flash_attention2", "triton"]: # noqa
         return _adapt_mixture_of_sparse_attention.apply(
-            query, key, value, sm_scale, head_index, attention_mask, attention_dropout, implementation
+            query, key, value, sm_scale, head_index, attention_mask, attention_dropout, "sdpa"
         )
     elif implementation == "moa":
         return _mixture_of_sparse_attention_decode.apply(

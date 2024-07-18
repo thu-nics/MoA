@@ -3,6 +3,7 @@ from transformers.cache_utils import DynamicCache as OriginalCache
 from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 import torch
+import math
 
 
 class NewDynamicCache(Cache):
@@ -1066,6 +1067,7 @@ def moa_config_to_cache_config(
     sink_size: int = 64,
     minimum_cache_size: int = 128,
     verbose: bool = True,
+    split_size: bool = 32,
 ):
     """
     Convert the MoA configuration to the cache configuration
@@ -1102,7 +1104,9 @@ def moa_config_to_cache_config(
                 + (seq_len + max_new_token) * betas[layer_id][head_id]
             )
             cache_size_this_head = min(
-                max(cache_size_this_head, minimum_cache_size), seq_len + max_new_token
+                math.ceil(max(cache_size_this_head, minimum_cache_size) / split_size)
+                * split_size,
+                seq_len + max_new_token,
             )
             cache_size_this_layer.append(cache_size_this_head)
             static_size_this_layer.append(min(cache_size_this_head, sink_size))
