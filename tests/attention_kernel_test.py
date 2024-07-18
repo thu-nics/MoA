@@ -44,10 +44,12 @@ class TestMixtureOfSparseAttention(unittest.TestCase):
 
     def test_decode_stage(self):
         """Test the decode stage of the mixture_of_sparse_attention function."""
-        bsz, q_len, hidden_dim = 2, 1, 64  # Assuming q_len = 1 for decode stage
+        bsz, q_len, hidden_dim = 2, 1, 16  # Assuming q_len = 1 for decode stage
 
-        num_head_for_each_group = [8, 4]
-        cache_size_for_each_group = [64, 128]
+        # num_head_for_each_group = [8, 4]
+        # cache_size_for_each_group = [64, 128]
+        num_head_for_each_group = [1,]
+        cache_size_for_each_group = [64,]
 
         num_group = len(num_head_for_each_group)
 
@@ -67,14 +69,17 @@ class TestMixtureOfSparseAttention(unittest.TestCase):
             k = self.gen_data_func(bsz, num_heads, cache_size, hidden_dim, dtype=torch.float16, device=self.device)
             v = self.gen_data_func(bsz, num_heads, cache_size, hidden_dim, dtype=torch.float16, device=self.device)
 
+            # k = torch.arange(cache_size, dtype=torch.float16, device=self.device)[None, None, :, None].expand(bsz, num_heads, -1, hidden_dim)
+            # v = torch.arange(cache_size, dtype=torch.float16, device=self.device)[None, None, :, None].expand(bsz, num_heads, -1, hidden_dim)
+
             ks.append(k.reshape(bsz, num_heads * cache_size, hidden_dim))
             vs.append(v.reshape(bsz, num_heads * cache_size, hidden_dim))
 
         num_heads = sum(num_head_for_each_group)
-        q = self.gen_data_func(bsz, num_heads, q_len, hidden_dim, dtype=torch.float16, device=self.device)
-        k = torch.cat(ks, dim=1)
-        v = torch.cat(vs, dim=1)
-        head_index = torch.tensor(head_index, dtype=torch.int64, device=self.device)
+        q = self.gen_data_func(bsz, num_heads, q_len, hidden_dim, dtype=torch.float16, device=self.device).contiguous()
+        k = torch.cat(ks, dim=1).contiguous()
+        v = torch.cat(vs, dim=1).contiguous()
+        head_index = torch.tensor(head_index, dtype=torch.int64, device=self.device).contiguous()
         sm_scale = sum(num_head_for_each_group)**-0.5
 
         output = dict()

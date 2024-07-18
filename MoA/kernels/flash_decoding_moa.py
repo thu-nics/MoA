@@ -198,7 +198,7 @@ def _moa_flash_decode_split_fwd_stage1(
                                     start_m, qk_scale,  #
                                     BLOCK_M, HEAD_DIM, BLOCK_N,  #
                                     4 - STAGE, offs_m, offs_n, KV_SPLIT_SIZE,
-                                    )
+                                )
 
     # epilogue
     m_i += tl.math.log2(l_i)
@@ -257,7 +257,7 @@ class _mixture_of_sparse_attention_decode(torch.autograd.Function):
         
 
         # prepare output
-        o = torch.empty((BATCH_SIZE, KV_SPLIT_NUM, QUERY_SIZE, HEAD_DIM), dtype=q.dtype, device=q.device) # shape (Z, H, SPLIT, N_IN, L)
+        o = torch.empty((BATCH_SIZE, KV_SPLIT_NUM, QUERY_SIZE, HEAD_DIM), dtype=q.dtype, device=q.device) # shape (Z, SPLIT, N_IN, L)
         l = torch.empty((BATCH_SIZE, KV_SPLIT_NUM, QUERY_SIZE), dtype=torch.float32, device=q.device)
         m = torch.empty((BATCH_SIZE, KV_SPLIT_NUM, QUERY_SIZE), dtype=torch.float32, device=q.device)
 
@@ -305,17 +305,19 @@ def _flash_decode_split_fwd_stage2(MID_O, MID_L, MID_M, split_to_head_index):
     batch_size, num_splits, query_size, head_dim = MID_O.shape
     num_heads = torch.max(split_to_head_index) + 1
 
-    M = torch.max(MID_M, dim=1).values # (batch_size, query_size)
+    MID_M *= 0.69314718055995 # MID_M stores max{log2(e) * S}, so multiply ln(2) to get max{e^S}
+
+    M = torch.max(MID_M, dim=1).values # (batch_size, query_size) # noqa: take max across all heads instead of within each head
     alpha = torch.exp(MID_M - M[:, None, :])  # (batch_size, num_splits, query_size)
     
     # Scatter L to shape (batch_size, num_heads, query_size)
     L_FOR_SUM = alpha * MID_L  # (batch_size, num_splits, query_size)
-    L = torch.zeros(batch_size, num_heads, query_size, device=MID_O.device)
+    L = torch.zeros(batch_size, num_heads, query_size, device=MID_O.device, dtype=L_FOR_SUM.dtype)
     L_scatter_index = split_to_head_index.view(1, num_splits, 1).expand([batch_size, -1, query_size])
     L = L.scatter_add(1, L_scatter_index, L_FOR_SUM) # shape (batch_size, num_heads, query_size)
 
     # Initialize an empty tensor for output
-    O = torch.zeros(batch_size, num_heads, query_size, head_dim, device=MID_O.device)
+    O = torch.zeros(batch_size, num_heads, query_size, head_dim, device=MID_O.device, dtype=L_FOR_SUM.dtype)
     output_scatter_index = split_to_head_index.view(1, num_splits, 1, 1).expand([batch_size, -1, query_size, head_dim])
     O = O.scatter_add(1, output_scatter_index, MID_O * L_FOR_SUM[:, :, :, None])
     O = O / L[:, :, :, None]  # (batch_size, num_head, query_size, head_dim)

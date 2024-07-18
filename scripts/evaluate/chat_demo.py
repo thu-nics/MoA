@@ -92,7 +92,7 @@ if __name__ == "__main__":
             input_lengths = torch.sum(input_ids!=tokenizer.pad_token_id, dim=-1).expand((args.batch_size))
 
             total_length = input_lengths + model_response_lengths
-            throughput = torch.sum(total_length).item() * 1000 / elapsed_time_ms # in token/s
+            throughput = torch.sum(model_response_lengths).item() * 1000 / elapsed_time_ms # in token/s
 
             # print summary of input length, response length, time taken and throughput, preserve 2 digits
             print(f"\n**************Summary*******************\n")
@@ -100,7 +100,7 @@ if __name__ == "__main__":
             print(f"Input length: {input_lengths.tolist()}")
             print(f"Response length: {model_response_lengths.tolist()}")
             print(f"Time taken: {elapsed_time_ms/1000:.2f} s")
-            print(f"Throughput: {throughput:.2f} token/s")
+            print(f"Decode Throughput: {throughput:.2f} token/s")
             print(f"Max memory usage: {max_memory:.2f} GB")
             print(f"\n*****************************************\n")
 
