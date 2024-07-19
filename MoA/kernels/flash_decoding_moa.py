@@ -138,7 +138,7 @@ def _moa_flash_decode_split_fwd_stage1(
 
     # pointer to batch
     q_offset = batch_id * stride_qz.to(tl.int64) + head_id * stride_qh.to(tl.int64)
-    kv_offset = batch_id * stride_kz.to(tl.int64)
+    kv_offset = batch_id * stride_kz.to(tl.int64) + split_id * KV_SPLIT_SIZE * stride_khn.to(tl.int64)
     o_offset = batch_id * stride_oz.to(tl.int64) + split_id * stride_os.to(tl.int64)
     
     # block pointers 
@@ -154,7 +154,7 @@ def _moa_flash_decode_split_fwd_stage1(
         base=V + kv_offset,
         shape=(N_CTX_H, HEAD_DIM),
         strides=(stride_vhn, stride_vk),
-        offsets=(split_id * KV_SPLIT_SIZE, 0),
+        offsets=(0, 0),
         block_shape=(BLOCK_N, HEAD_DIM),
         order=(1, 0),
     )
@@ -162,7 +162,7 @@ def _moa_flash_decode_split_fwd_stage1(
         base=K + kv_offset,
         shape=(HEAD_DIM, N_CTX_H),
         strides=(stride_kk, stride_khn),
-        offsets=(0, split_id * KV_SPLIT_SIZE),
+        offsets=(0, 0),
         block_shape=(HEAD_DIM, BLOCK_N),
         order=(0, 1),
     )
@@ -251,7 +251,7 @@ class _mixture_of_sparse_attention_decode(torch.autograd.Function):
         assert HEAD_DIM in {16, 32, 64, 128, 256}
 
 
-        KV_SPLIT_SIZE = 32 # 16 * 2
+        KV_SPLIT_SIZE = 64 # 16n
         CTX_HEAD_SIZE = k.shape[1]
         KV_SPLIT_NUM = triton.cdiv(CTX_HEAD_SIZE, KV_SPLIT_SIZE) # noqa: assume each head can be divided by KV_SPLIT_SIZE
         

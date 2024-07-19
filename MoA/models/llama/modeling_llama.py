@@ -109,7 +109,7 @@ def LlamaModel_MixtureAttention_forward(
                 max_new_token=0,
                 sink_size=64,
                 minimum_cache_size=128,
-                verbose=False,
+                verbose=True,
             )
             past_key_values = StaticCircularCache(
                 **cache_config,
