@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 import torch
 import math
-
+import torch_scatter
 
 class NewDynamicCache(Cache):
     def __init__(
@@ -899,9 +899,6 @@ class StaticCircularCache(Cache):
         assert layer_idx < self.num_layers
         assert key_states.shape[1] == self.num_head_for_each_layer[layer_idx]
 
-        # TODO: move the sink part to the left side
-        # padding - sink - circular
-
         # Update the number of seen tokens
         batch_size = key_states.shape[0]
         seq_len = key_states[0].shape[-2]
@@ -910,136 +907,156 @@ class StaticCircularCache(Cache):
         if layer_idx == 0:
             self.seen_tokens += seq_len
 
-        # Use the attention mask to find the starting point of the valid inputs
-        if attention_mask is not None:
-            assert (
-                len(attention_mask.shape) == 2
-            ), "The shape of the attention mask should be [batch_size, kv_len] and the dtype should be torch.int64."
-            # attention_mask shape is (batch_size, self._kv_len[layer_idx])
-            # take the newly added part of the attention mask
-            attention_mask = attention_mask[
-                :, -seq_len:
-            ]  # shape: [batch_size, seq_len]
-        else:
-            attention_mask = torch.ones(
-                (batch_size, seq_len), dtype=torch.int64, device=self.device
-            )  # shape: [batch_size, seq_len]
-        advancing_pos = (
-            torch.cumsum(attention_mask, dim=-1, dtype=torch.int64) - 1
-        )  # shape: [batch_size, seq_len]; For masked positions, they do not store in the cache nor advance the pos
-        advancing_pos = torch.cat(
-            [advancing_pos, advancing_pos[:, -1, None] + 1], dim=-1
-        )  # shape: [batch_size, seq_len+1]
-        reversed_advancing_pos = torch.flip(
-            torch.cumsum(
-                torch.flip(attention_mask, dims=[-1]), dim=-1, dtype=torch.int64
-            ),
-            dims=[-1],
-        )  # shape: [batch_size, seq_len]; For masked positions, they do not store in the cache nor advance the pos
+        is_decode = (seq_len == 1)
 
-        update_index_circular = (
-            (
-                self._next_update_index[layer_idx][:, None, :]
-                + advancing_pos[:, :, None]
-                - self.circular_cache_head_index[layer_idx][None, None, :]
-            )
-            % self.circular_cache_size[layer_idx][None, None, :]
-        ) + self.circular_cache_head_index[layer_idx][
-            None, None, :
-        ]  # shape: (batch_size, seq_len+1, num_heads), ending at _kv_len > static_len
-        update_index_static = (
-            self._next_update_index[layer_idx][:, None, :] + advancing_pos[:, :, None]
-        )  # shape: (batch_size, seq_len+1, num_heads), ending at _kv_len <= static_len
-        update_index = torch.where(
-            self._kv_len[layer_idx] + advancing_pos[:, :, None]
-            > self.static_cache_size[layer_idx][None, None, :],
-            update_index_circular,
-            update_index_static,
-        )  # shape: (batch_size, seq_len+1, num_heads)
-
-        self._kv_len[layer_idx] += seq_len
-
-        self._next_update_index[layer_idx] = update_index[:, -1, :]
-        update_index = update_index[:, :-1, :].permute(
-            0, 2, 1
-        )  # shape: (batch_size, num_heads, seq_len), value are in the realm of num_heads * seq_len
-
-        # If the seq_len is so long that it > cache size, will cause scatter error (ideally, only the latter indexed key/value should be reserved)
-        # keep the index where ((A) the final size is less or equal than the circular cache size OR (B) index within static cache) AND (C) not masked
-        valid_index_map = (
-            (
-                reversed_advancing_pos[:, None, :]
-                <= self.circular_cache_size[layer_idx][None, :, None]
-            )
-            | (update_index < self.circular_cache_head_index[layer_idx][None, :, None])
-        ) & (
-            attention_mask[:, None, :] == 1
-        )  # shape (batch_size, num_heads, seq_len)
-
-        # operate at the realm of batch_size * num_heads * seq_len
-        batch_update_index = (
-            update_index
-            + torch.sum(self.cache_size[layer_idx])
-            * torch.arange(batch_size, device=self.device)[:, None, None]
-        )  # shape: (batch_size, num_heads, seq_len), values recalculate the index so that it index at the realm of batch_size * num_heads * seq_len
-        valid_update_index = batch_update_index[
-            valid_index_map
-        ].contiguous()  # shape: (batch_size * num_heads * seq_len)
-        valid_key_states = key_states.reshape(-1, head_dim)[
-            valid_index_map.reshape(-1), :
-        ]  # shape (batch_size * num_heads * seq_len, head_dim)
-        valid_value_states = value_states.reshape(-1, head_dim)[
-            valid_index_map.reshape(-1), :
-        ]  # shape (batch_size * num_heads * seq_len, head_dim)
-
-        # assign the attention mask to the cache
-        valid_attention_mask = attention_mask.repeat(1, num_head).reshape(-1)[
-            valid_index_map.reshape(-1)
-        ]  # shape: [batch_size * num_heads * seq_len]
-        self.mask_cache[layer_idx] = (
-            torch.scatter(
-                self.mask_cache[layer_idx].view(-1),
-                0,
-                valid_update_index,
-                valid_attention_mask,
-            )
-            .reshape(batch_size, -1)
-            .contiguous()
-        )  # shape: [batch_size, num_heads * cache_size]
-
-        valid_update_index = (
-            valid_update_index[:, None].expand(-1, head_dim).contiguous()
-        )  # shape: [batch_size * num_heads * seq_len, head_dim]
-
-        # assign the new key_states and value_states to the cache by the update_index
-        self.key_cache[layer_idx] = (
-            torch.scatter(
-                self.key_cache[layer_idx].view(-1, head_dim),
-                0,
-                valid_update_index,
-                valid_key_states,
-            )
-            .reshape(batch_size, -1, head_dim)
-            .contiguous()
-        )
-        self.value_cache[layer_idx] = (
-            torch.scatter(
-                self.value_cache[layer_idx].view(-1, head_dim),
-                0,
-                valid_update_index,
-                valid_value_states,
-            )
-            .reshape(batch_size, -1, head_dim)
-            .contiguous()
-        )
-
-        is_decode = key_states.shape[-2] == 1
         if is_decode:
-            # TODO: kernel do not support contigious cache. For now, return a list of grouped cache
+            # only update the last token of the cache, use simpler logic to speedup
+            update_hctx_index = self._next_update_index[layer_idx] # shape (batch_size, num_heads)
+            batch_index = torch.arange(start=0, end=batch_size, device=self.device).unsqueeze(1) # to index shape (batch_size, num_heads, ...)
+
+            self.mask_cache[layer_idx][batch_index, update_hctx_index] = 1 
+            self.value_cache[layer_idx][batch_index, update_hctx_index] = value_states[:, :, -1, :] 
+            self.key_cache[layer_idx][batch_index, update_hctx_index] = key_states[:, :, -1, :]
+
+            is_circular = (self._kv_len[layer_idx] + 1 > self.static_cache_size[layer_idx])[None, :] # shape (1, num_heads)
+            self._next_update_index[layer_idx] = (
+                (
+                    self._next_update_index[layer_idx]
+                    + 1
+                    - self.circular_cache_head_index[layer_idx][None, :]
+                )
+                % self.circular_cache_size[layer_idx][None, :]
+                + self.circular_cache_head_index[layer_idx][None, :]
+            ) * is_circular + (self._next_update_index[layer_idx] + 1) * (~is_circular)
+
+            self._kv_len[layer_idx] += 1
+
             return self.key_cache[layer_idx], self.value_cache[layer_idx]
-            # return self.to_group_contigious(self.key_cache[layer_idx], self.head_index[layer_idx], self.cache_size[layer_idx]), self.to_group_contigious(self.value_cache[layer_idx], self.head_index[layer_idx], self.cache_size[layer_idx])
+
         else:
-            # prefill
+            # Use the attention mask to find the starting point of the valid inputs
+            if attention_mask is not None:
+                assert (
+                    len(attention_mask.shape) == 2
+                ), "The shape of the attention mask should be [batch_size, kv_len] and the dtype should be torch.int64."
+                # attention_mask shape is (batch_size, self._kv_len[layer_idx])
+                # take the newly added part of the attention mask
+                attention_mask = attention_mask[
+                    :, -seq_len:
+                ]  # shape: [batch_size, seq_len]
+            else:
+                attention_mask = torch.ones(
+                    (batch_size, seq_len), dtype=torch.int64, device=self.device
+                )  # shape: [batch_size, seq_len]
+            advancing_pos = (
+                torch.cumsum(attention_mask, dim=-1, dtype=torch.int64) - 1
+            )  # shape: [batch_size, seq_len]; For masked positions, they do not store in the cache nor advance the pos
+            advancing_pos = torch.cat(
+                [advancing_pos, advancing_pos[:, -1, None] + 1], dim=-1
+            )  # shape: [batch_size, seq_len+1]
+            reversed_advancing_pos = torch.flip(
+                torch.cumsum(
+                    torch.flip(attention_mask, dims=[-1]), dim=-1, dtype=torch.int64
+                ),
+                dims=[-1],
+            )  # shape: [batch_size, seq_len]; For masked positions, they do not store in the cache nor advance the pos
+
+            update_index_circular = (
+                (
+                    self._next_update_index[layer_idx][:, None, :]
+                    + advancing_pos[:, :, None]
+                    - self.circular_cache_head_index[layer_idx][None, None, :]
+                )
+                % self.circular_cache_size[layer_idx][None, None, :]
+            ) + self.circular_cache_head_index[layer_idx][
+                None, None, :
+            ]  # shape: (batch_size, seq_len+1, num_heads), ending at _kv_len > static_len
+            update_index_static = (
+                self._next_update_index[layer_idx][:, None, :] + advancing_pos[:, :, None]
+            )  # shape: (batch_size, seq_len+1, num_heads), ending at _kv_len <= static_len
+            update_hctx_index = torch.where(
+                self._kv_len[layer_idx] + advancing_pos[:, :, None]
+                > self.static_cache_size[layer_idx][None, None, :],
+                update_index_circular,
+                update_index_static,
+            )  # shape: (batch_size, seq_len+1, num_heads)
+
+            self._kv_len[layer_idx] += seq_len
+
+            self._next_update_index[layer_idx] = update_hctx_index[:, -1, :]
+            update_hctx_index = update_hctx_index[:, :-1, :].permute(
+                0, 2, 1
+            )  # shape: (batch_size, num_heads, seq_len), value are in the realm of num_heads * seq_len
+
+            # If the seq_len is so long that it > cache size, will cause scatter error (ideally, only the latter indexed key/value should be reserved)
+            # keep the index where ((A) the final size is less or equal than the circular cache size OR (B) index within static cache) AND (C) not masked
+            valid_index_map = (
+                (
+                    reversed_advancing_pos[:, None, :]
+                    <= self.circular_cache_size[layer_idx][None, :, None]
+                )
+                | (update_hctx_index < self.circular_cache_head_index[layer_idx][None, :, None])
+            ) & (
+                attention_mask[:, None, :] == 1
+            )  # shape (batch_size, num_heads, seq_len)
+
+            # operate at the realm of batch_size * num_heads * seq_len
+            batch_update_index = (
+                update_hctx_index
+                + torch.sum(self.cache_size[layer_idx])
+                * torch.arange(batch_size, device=self.device)[:, None, None]
+            )  # shape: (batch_size, num_heads, seq_len), values recalculate the index so that it index at the realm of batch_size * num_heads * seq_len
+            valid_update_index = batch_update_index[
+                valid_index_map
+            ].contiguous()  # shape: (batch_size * num_heads * seq_len)
+            valid_key_states = key_states.reshape(-1, head_dim)[
+                valid_index_map.reshape(-1), :
+            ]  # shape (batch_size * num_heads * seq_len, head_dim)
+            valid_value_states = value_states.reshape(-1, head_dim)[
+                valid_index_map.reshape(-1), :
+            ]  # shape (batch_size * num_heads * seq_len, head_dim)
+
+            # assign the attention mask to the cache
+            valid_attention_mask = attention_mask.repeat(1, num_head).reshape(-1)[
+                valid_index_map.reshape(-1)
+            ]  # shape: [batch_size * num_heads * seq_len]
+            self.mask_cache[layer_idx] = (
+                torch.scatter(
+                    self.mask_cache[layer_idx].view(-1),
+                    0,
+                    valid_update_index,
+                    valid_attention_mask,
+                )
+                .reshape(batch_size, -1)
+                .contiguous()
+            )  # shape: [batch_size, num_heads * cache_size]
+
+            valid_update_index = (
+                valid_update_index[:, None].expand(-1, head_dim).contiguous()
+            )  # shape: [batch_size * num_heads * seq_len, head_dim]
+
+            # assign the new key_states and value_states to the cache by the update_index
+            self.key_cache[layer_idx] = (
+                torch.scatter(
+                    self.key_cache[layer_idx].view(-1, head_dim),
+                    0,
+                    valid_update_index,
+                    valid_key_states,
+                )
+                .reshape(batch_size, -1, head_dim)
+                .contiguous()
+            )
+            self.value_cache[layer_idx] = (
+                torch.scatter(
+                    self.value_cache[layer_idx].view(-1, head_dim),
+                    0,
+                    valid_update_index,
+                    valid_value_states,
+                )
+                .reshape(batch_size, -1, head_dim)
+                .contiguous()
+            )
+
             # TODO: for multi-round conversation, how to deal with the caches from the previous rounds whose lengths are different. Ignoring all history for now
             return key_states, value_states
 
@@ -1067,7 +1084,7 @@ def moa_config_to_cache_config(
     sink_size: int = 64,
     minimum_cache_size: int = 128,
     verbose: bool = True,
-    split_size: bool = 32,
+    split_size: bool = 64,
 ):
     """
     Convert the MoA configuration to the cache configuration
