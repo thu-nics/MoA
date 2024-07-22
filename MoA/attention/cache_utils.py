@@ -657,22 +657,30 @@ class StaticCircularCache(Cache):
         static_size: Optional[List[List[int]]] = None,
         device="cpu",
         dtype=None,
+        update_cache_content=True,
     ) -> None:
         """
         Parameters:
             cache_size (`List[List[int]]`):
                 The total cache size for each head in each layer. The cache size is the sum of the global part and the band part.
-            static_size (*optional*, `List[List[int]]`):
-                The size of the static part for each head in each layer. If not provided, the static part will be set to 0.
-            dtype (*optional*, `torch.dtype`):
-                The data type of the cache. If not provided, it will be set to `torch.float32`.
             batch_size (*optional*, `int`):
                 The batch size of the input data. If not provided, it will be set to 1.
             head_dim (*optional*, `int`):
                 The dimension of the head. If not provided, it will be set to 64.
+            static_size (*optional*, `List[List[int]]`):
+                The size of the static part for each head in each layer. If not provided, the static part will be set to 0.
+            device (*optional*, `torch.device`):
+                The device of the cache. If not provided, it will be set to `cpu`.
+            dtype (*optional*, `torch.dtype`):
+                The data type of the cache. If not provided, it will be set to `torch.float16`.
+            update_cache_content (*optional*, `bool`):
+                Whether to update the cache content when calling `.update`. If not provided, it will be set to `True`. Set to False if the kernel update the content
         """
-        self.dtype = dtype if dtype is not None else torch.float32
+        self.dtype = dtype if dtype is not None else torch.float16
         self.device = device
+        self.update_cache_content = update_cache_content
+        self.batch_size = batch_size
+        self.head_dim = head_dim
 
         # initialize the cache sizes and indices
         self.num_layers = len(cache_size)
@@ -685,7 +693,7 @@ class StaticCircularCache(Cache):
                 for layer_id in range(self.num_layers)
             ]
 
-        self.cache_size: List[torch.Tensor] = [
+        self.cache_max_length: List[torch.Tensor] = [
             torch.tensor(cache_size_this_layer, device=device)
             for cache_size_this_layer in cache_size
         ]
@@ -696,17 +704,17 @@ class StaticCircularCache(Cache):
         self.circular_cache_size: List[torch.Tensor] = [
             cache_size_this_layer - static_size_this_layer
             for cache_size_this_layer, static_size_this_layer in zip(
-                self.cache_size, self.static_cache_size
+                self.cache_max_length, self.static_cache_size
             )
         ]
 
-        self.total_cache_size: List[int] = [
+        self.layer_cache_size: List[int] = [
             sum(this_cache_size) for this_cache_size in cache_size
         ]  # total cache size for each layer
         head_start_index = [
             [] for layer_id in range(self.num_layers)
         ]  # the starting index of each head in each layer
-        # head_end_index = [[] for layer_id in range(self.num_layers)] # the ending index of each head in each layer
+
         for layer_id in range(self.num_layers):
             for head_id in range(len(cache_size[layer_id])):
                 if head_id == 0:
@@ -716,7 +724,9 @@ class StaticCircularCache(Cache):
                         head_start_index[layer_id][-1]
                         + cache_size[layer_id][head_id - 1]
                     )
-                # head_end_index[layer_id].append(head_start_index[layer_id][head_id] + cache_size[layer_id][head_id])
+        self.cache_head_start_index = [torch.tensor(head_start_index[layer_id], device=self.device)[None, :].expand(batch_size, num_head).contiguous()] # shape: (batch_size, num_heads) * num_layers, the starting index of each head in each layer
+        
+        for layer_id in range(self.num_layers):
             # add another start index to indicate the end of the last head
             head_start_index[layer_id].append(
                 head_start_index[layer_id][-1] + cache_size[layer_id][-1]
@@ -724,8 +734,8 @@ class StaticCircularCache(Cache):
         self.head_index = [
             torch.tensor(head_start_index[layer_id], dtype=int, device=device)
             for layer_id in range(self.num_layers)
-        ]  # shape: (num_heads+1) * num_layers, the starting index of each head in each layer
-        # self.cache_head_end_index = [torch.tensor(head_end_index[layer_id], dtype=int, device=device) for layer_id in range(self.num_layers)]
+        ]  # shape: (num_heads+1) * num_layers, the starting index of each head in each layer; contains the additional index to show the end of the cache
+        
         self.circular_cache_head_index: List[torch.tensor] = [
             torch.tensor(
                 [
@@ -737,7 +747,7 @@ class StaticCircularCache(Cache):
             for layer_id in range(self.num_layers)
         ]  # the starting index of the circular part of each head in each layer
 
-        self._next_update_index: List[torch.Tensor] = [
+        self.cache_update_index: List[torch.Tensor] = [
             torch.tensor(
                 head_start_index[layer_id][:-1], dtype=int, device=device
             ).expand(batch_size, -1)
@@ -765,7 +775,7 @@ class StaticCircularCache(Cache):
                 dtype=self.dtype,
                 device=device,
             )
-            for total_cache_size_this in self.total_cache_size
+            for total_cache_size_this in self.layer_cache_size
         ]
         self.value_cache: List[torch.Tensor] = [
             torch.zeros(
@@ -775,14 +785,18 @@ class StaticCircularCache(Cache):
                 dtype=self.dtype,
                 device=device,
             )
-            for total_cache_size_this in self.total_cache_size
+            for total_cache_size_this in self.layer_cache_size
         ]
         self.mask_cache: List[torch.Tensor] = [
             torch.zeros(
                 batch_size, total_cache_size_this, dtype=torch.int64, device=device
             )
-            for total_cache_size_this in self.total_cache_size
+            for total_cache_size_this in self.layer_cache_size
         ]  # 1 means not masked, 0 means masked
+        self.cache_valid_length: List[torch.Tensor] = [
+            torch.zeros((batch_size, num_head), dtype=torch.int64, device=device)
+            for layer_id in range(self.num_layers)
+        ]
 
     @staticmethod
     def to_uncontigious(
@@ -899,11 +913,18 @@ class StaticCircularCache(Cache):
         assert layer_idx < self.num_layers
         assert key_states.shape[1] == self.num_head_for_each_layer[layer_idx]
 
-        # Update the number of seen tokens
-        batch_size = key_states.shape[0]
-        seq_len = key_states[0].shape[-2]
-        head_dim = key_states[0].shape[-1]
+        # if do not update cache content, key and value may be None
+        if self.update_cache_content:
+            batch_size = key_states.shape[0]
+            seq_len = key_states.shape[-2]
+            head_dim = key_states.shape[-1]
+        else:
+            batch_size = self.batch_size
+            seq_len = key_states.shape[-2] if key_states is not None else 1
+            head_dim = self.head_dim
         num_head = self.num_head_for_each_layer[layer_idx]
+
+        # Update the number of seen tokens
         if layer_idx == 0:
             self.seen_tokens += seq_len
 
@@ -911,23 +932,27 @@ class StaticCircularCache(Cache):
 
         if is_decode:
             # only update the last token of the cache, use simpler logic to speedup
-            update_hctx_index = self._next_update_index[layer_idx] # shape (batch_size, num_heads)
+            update_hctx_index = self.cache_update_index[layer_idx] # shape (batch_size, num_heads)
             batch_index = torch.arange(start=0, end=batch_size, device=self.device).unsqueeze(1) # to index shape (batch_size, num_heads, ...)
 
-            self.mask_cache[layer_idx][batch_index, update_hctx_index] = 1 
-            self.value_cache[layer_idx][batch_index, update_hctx_index] = value_states[:, :, -1, :] 
-            self.key_cache[layer_idx][batch_index, update_hctx_index] = key_states[:, :, -1, :]
+            self.mask_cache[layer_idx][batch_index, update_hctx_index] = 1
+            if self.update_cache_content:
+                self.value_cache[layer_idx][batch_index, update_hctx_index] = value_states[:, :, -1, :] 
+                self.key_cache[layer_idx][batch_index, update_hctx_index] = key_states[:, :, -1, :]
+
+            # update valid cache length
+            self.cache_valid_length[layer_idx] += (self.cache_valid_length[layer_idx] < self.cache_max_length[layer_idx])
 
             is_circular = (self._kv_len[layer_idx] + 1 > self.static_cache_size[layer_idx])[None, :] # shape (1, num_heads)
-            self._next_update_index[layer_idx] = (
+            self.cache_update_index[layer_idx] = (
                 (
-                    self._next_update_index[layer_idx]
+                    self.cache_update_index[layer_idx]
                     + 1
                     - self.circular_cache_head_index[layer_idx][None, :]
                 )
                 % self.circular_cache_size[layer_idx][None, :]
                 + self.circular_cache_head_index[layer_idx][None, :]
-            ) * is_circular + (self._next_update_index[layer_idx] + 1) * (~is_circular)
+            ) * is_circular + (self.cache_update_index[layer_idx] + 1) * (~is_circular)
 
             self._kv_len[layer_idx] += 1
 
@@ -963,7 +988,7 @@ class StaticCircularCache(Cache):
 
             update_index_circular = (
                 (
-                    self._next_update_index[layer_idx][:, None, :]
+                    self.cache_update_index[layer_idx][:, None, :]
                     + advancing_pos[:, :, None]
                     - self.circular_cache_head_index[layer_idx][None, None, :]
                 )
@@ -972,7 +997,7 @@ class StaticCircularCache(Cache):
                 None, None, :
             ]  # shape: (batch_size, seq_len+1, num_heads), ending at _kv_len > static_len
             update_index_static = (
-                self._next_update_index[layer_idx][:, None, :] + advancing_pos[:, :, None]
+                self.cache_update_index[layer_idx][:, None, :] + advancing_pos[:, :, None]
             )  # shape: (batch_size, seq_len+1, num_heads), ending at _kv_len <= static_len
             update_hctx_index = torch.where(
                 self._kv_len[layer_idx] + advancing_pos[:, :, None]
@@ -983,7 +1008,7 @@ class StaticCircularCache(Cache):
 
             self._kv_len[layer_idx] += seq_len
 
-            self._next_update_index[layer_idx] = update_hctx_index[:, -1, :]
+            self.cache_update_index[layer_idx] = update_hctx_index[:, -1, :]
             update_hctx_index = update_hctx_index[:, :-1, :].permute(
                 0, 2, 1
             )  # shape: (batch_size, num_heads, seq_len), value are in the realm of num_heads * seq_len
@@ -1000,10 +1025,12 @@ class StaticCircularCache(Cache):
                 attention_mask[:, None, :] == 1
             )  # shape (batch_size, num_heads, seq_len)
 
+            self.cache_valid_length[layer_idx] += torch.sum(valid_index_map, dim=-1)
+
             # operate at the realm of batch_size * num_heads * seq_len
             batch_update_index = (
                 update_hctx_index
-                + torch.sum(self.cache_size[layer_idx])
+                + torch.sum(self.cache_max_length[layer_idx])
                 * torch.arange(batch_size, device=self.device)[:, None, None]
             )  # shape: (batch_size, num_heads, seq_len), values recalculate the index so that it index at the realm of batch_size * num_heads * seq_len
             valid_update_index = batch_update_index[
