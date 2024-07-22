@@ -724,7 +724,7 @@ class StaticCircularCache(Cache):
                         head_start_index[layer_id][-1]
                         + cache_size[layer_id][head_id - 1]
                     )
-        self.cache_head_start_index = [torch.tensor(head_start_index[layer_id], device=self.device)[None, :].expand(batch_size, num_head).contiguous()] # shape: (batch_size, num_heads) * num_layers, the starting index of each head in each layer
+        self.cache_head_start_index = [torch.tensor(head_start_index[layer_id], device=self.device)[None, :].expand(batch_size, self.num_head_for_each_layer[layer_id]).contiguous() for layer_id in range(self.num_layers)] # shape: (batch_size, num_heads) * num_layers, the starting index of each head in each layer
         
         for layer_id in range(self.num_layers):
             # add another start index to indicate the end of the last head
@@ -794,7 +794,7 @@ class StaticCircularCache(Cache):
             for total_cache_size_this in self.layer_cache_size
         ]  # 1 means not masked, 0 means masked
         self.cache_valid_length: List[torch.Tensor] = [
-            torch.zeros((batch_size, num_head), dtype=torch.int64, device=device)
+            torch.zeros((batch_size, self.num_head_for_each_layer[layer_id]), dtype=torch.int64, device=device)
             for layer_id in range(self.num_layers)
         ]
 
