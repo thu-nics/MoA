@@ -6,7 +6,10 @@ import argparse
 ## for llama-3 accuracy test only ##
 
 parser = argparse.ArgumentParser()
+
 parser.add_argument("--model_path", type=str, default='gradientai/Llama-3-8B-Instruct-262k')
+parser.add_argument("--output_path", type=str, default='gradientai-Llama-3-8B-Instruct-262k-expanded')
+
 args = parser.parse_args()
 
 model_path = args.model_path
@@ -17,7 +20,9 @@ tokenizer = AutoTokenizer.from_pretrained(model_path)
 model1 = LlamaForCausalLM.from_pretrained(model_path, torch_dtype=torch.float16)
 
 # allow mismatch
-model2 = LlamaForCausalLM.from_pretrained(model_path, torch_dtype=torch.float16, num_key_value_heads=32, ignore_mismatched_sizes=True)
+num_attention_heads = model1.config.num_attention_heads
+print(f"convert to {num_attention_heads} KV heads")
+model2 = LlamaForCausalLM.from_pretrained(model_path, torch_dtype=torch.float16, num_key_value_heads=num_attention_heads, ignore_mismatched_sizes=True)
 
 num_key_value_heads = config.num_key_value_heads
 num_heads = config.num_attention_heads
@@ -60,4 +65,4 @@ for decoder_layer1, decoder_layer2 in zip(model1.model.layers, model2.model.laye
     decoder_layer2.self_attn.k_proj = k_proj1
     decoder_layer2.self_attn.v_proj = v_proj1
 
-model2.save_pretrained("./llama-3-262k-expanded")
+model2.save_pretrained(args.output_path)

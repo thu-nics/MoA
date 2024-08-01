@@ -222,6 +222,9 @@ if __name__ == "__main__":
             args.lut_path, None, model.model.layers, block_size, permute_head, sparse_decode,
         )
 
+    if model.generation_config.pad_token_id is None:
+        model.generation_config.pad_token_id = tokenizer.pad_token_id
+
     """
     evaluate
     """
@@ -229,12 +232,13 @@ if __name__ == "__main__":
     model_name = args.model_name
 
     # load dataset
-    dataset_path = "nics-efc/MoA_Long_Retrieval"
+    remote_dataset_path = "nics-efc/MoA_Long_Retrieval"
 
     if args.dataset_path is not None:
-        dataset_path = args.dataset_path
-
-    dataset = load_dataset(dataset_path, split="test")
+        dataset = load_from_disk(args.dataset_path)
+    else:
+        dataset = load_dataset(remote_dataset_path, split="test")
+    
 
     # iter through dataset
     result_dict = {
