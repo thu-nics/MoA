@@ -882,6 +882,7 @@ def LlamaDecoderLayer_set_static_attention_lut(self, lut_list, lut_for_head, blo
     if device is None:
         device = self.self_attn.o_proj.weight.device
         # print(device)
+        
     lut_list = [lut.to(device) for lut in lut_list]
     lut_token_len = [lut.shape[1] * block_size for lut in lut_list]
        

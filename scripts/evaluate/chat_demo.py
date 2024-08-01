@@ -20,7 +20,7 @@ args = parser.parse_args()
 model_name = args.model_name
 device = "cuda" if torch.cuda.is_available() else "cpu"
 attention_implementation = "eager" if args.lut_path is not None else "sdpa"
-model = AutoModelForCausalLM.from_pretrained(model_name, device_map="cuda", _attn_implementation = attention_implementation, _attn_implementation_internal = attention_implementation, torch_dtype=torch.float16)
+model = AutoModelForCausalLM.from_pretrained(model_name, device_map="auto", _attn_implementation = attention_implementation, _attn_implementation_internal = attention_implementation, torch_dtype=torch.float16)
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 
 if args.lut_path is not None:
