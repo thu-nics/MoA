@@ -140,12 +140,14 @@ parser.add_argument('--model_name', type=str, default='lmsys/vicuna-7b-v1.5-16k'
 parser.add_argument('--tokenizer_name', type=str, default=None)
 parser.add_argument('--max_length', type=int, default=2048, help='max length of the sequence')
 parser.add_argument('--dataset_dir', type=str, help='dataset directory')
+parser.add_argument('--split', type=str, default=None, help='split of the dataset')
+parser.add_argument('--load_from_disk', action='store_true')
 parser.add_argument('--response_mask', action='store_true', help='whether to mask the response part')
 parser.add_argument('--loss_type', choices=['cross_entropy', 'ppl'], default='cross_entropy', help='loss type')
 parser.add_argument('--dtype', choices=['fp32', 'fp16', 'bf16'], default='fp16')
 
 parser.add_argument('--result_path', type=str, default=None, help='result path')
-parser.add_argument('--total_length_level_down', type=int, default=2)
+parser.add_argument('--total_length_level_down', type=int, default=None)
 
 parser.add_argument('--h2o', action='store_true', help='use h2o')
 parser.add_argument('--heavy', type=int, default=512)
@@ -166,7 +168,16 @@ if __name__ == '__main__':
 
     assert args.max_length % 1024 == 0
 
+    if args.total_length_level_down is None:
+        if "llama-3" in args.model_name.lower():
+            # llama3 tokenizer is more efficient than llama2, resulting in less tokens
+            args.total_length_level_down = 4
+        else:
+            args.total_length_level_down = 2
+
     args.total_length_level = args.max_length // 1024
+
+    dataset = load_from_disk(args.dataset_dir)
 
     config = AutoConfig.from_pretrained(args.model_name)
     config._attn_implementation_internal = "eager"
@@ -189,7 +200,6 @@ if __name__ == '__main__':
         user_prefix = None
         assistant_prefix = None
 
-    dataset = load_from_disk(args.dataset_dir)
 
     loss_list = evaluate(model, tokenizer, args, dataset, args.max_length, user_prefix, assistant_prefix)
     if 'dataset' in dataset.column_names:

@@ -112,7 +112,7 @@ def LlamaModel_block_sparse_lut_forward(
     ### prepare cache ###
     if use_cache:
         if past_key_values is None:
-            past_key_values = CircularCache(pattern_num=2)
+            past_key_values = CircularCache(pattern_num=2, num_layers=len(self.layers))
         past_key_values_length = past_key_values.seen_tokens
     ### end of perpare cache ###
 
@@ -128,26 +128,9 @@ def LlamaModel_block_sparse_lut_forward(
     if inputs_embeds is None:
         inputs_embeds = self.embed_tokens(input_ids)
 
-    if self._use_flash_attention_2:
-        raise NotImplementedError("flash attention 2 is not supported in block sparse lut")
-        # 2d mask is passed through the layers
-        attention_mask = attention_mask if (attention_mask is not None and 0 in attention_mask) else None
-    elif self._use_sdpa and not output_attentions:
-        raise NotImplementedError("sdpa is not supported in block sparse lut")
-        # output_attentions=True can not be supported when using SDPA, and we fall back on
-        # the manual implementation that requires a 4D causal mask in all cases.
-        attention_mask = _prepare_4d_causal_attention_mask_for_sdpa(
-            attention_mask,
-            (batch_size, seq_length),
-            inputs_embeds,
-            past_key_values_length,
-        )
-    else:
-        #! you can disable this part for better performance
-        # 4d mask is passed through the layers
-        attention_mask = _prepare_4d_causal_attention_mask(
-            attention_mask, (batch_size, seq_length), inputs_embeds, past_key_values_length
-        )
+    attention_mask = _prepare_4d_causal_attention_mask(
+        attention_mask, (batch_size, seq_length), inputs_embeds, past_key_values_length
+    )
 
     # embed positions
     hidden_states = inputs_embeds
@@ -211,7 +194,7 @@ def LlamaModel_block_sparse_lut_forward(
     # ! you can pass only the hidden_states of last seq length for better performance
     return BaseModelOutputWithPast(
         last_hidden_state=hidden_states,
-        ## use this to past only the hidden_states of last seq length
+        ### use this to past only the hidden_states of last seq length
         # last_hidden_state=hidden_states[:, -1:, :], 
         past_key_values=next_cache,
         hidden_states=all_hidden_states,

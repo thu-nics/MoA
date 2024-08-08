@@ -20,8 +20,8 @@ from MoA.models.interface import update_model_function
 # triton implementation ONLY support single GPU inference
 # os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
-os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
-os.environ["TORCH_USE_CUDA_DSA"] = "1"
+# os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
+# os.environ["TORCH_USE_CUDA_DSA"] = "1"
 
 def compress_model_attention(
     model,
@@ -206,7 +206,7 @@ def parse_args():
     )
 
     parser.add_argument(
-        "--evaluation_dataset", type=str, nargs='*', default=None,
+        "--evaluation_dataset", type=str, nargs='+', default=None,
     )
 
     parser.add_argument(
@@ -270,6 +270,10 @@ if __name__ == "__main__":
         lut_path=args.lut_path,
         args=args,
     )
+
+    if model.generation_config.pad_token_id is None:
+        model.generation_config.pad_token_id = tokenizer.pad_token_id
+
 
     # evaluate with LongBench
     if args.eval == "longbench" or args.eval == "longbench_fast":
