@@ -17,6 +17,7 @@ parser.add_argument("--model_path", type=str, default="lmsys/vicuna-7b-v1.5-16k"
 parser.add_argument("--model_name", type=str, default="vicuna-7b-v1.5-16k")
 parser.add_argument("--dataset_name", type=str, default="multi_news")
 parser.add_argument("--output_path_base", type=str, default="local/dataset")
+parser.add_argument("--max_length_level", type=int, default=8, help="The maximum length during profiling, in thousand tokens")
 args = parser.parse_args()
 
 model_path = args.model_path
@@ -52,7 +53,10 @@ answer_format = df[df["dataset_names"] == dataset_name_short]["answer_format"].v
 
 # load tokenizer
 tokenizer = AutoTokenizer.from_pretrained(model_path,  padding_side='left', trust_remote_code=True)
-tokenizer.pad_token = tokenizer.eos_token
+if tokenizer.pad_token is None:
+    tokenizer.pad_token = tokenizer.eos_token
+if tokenizer.pad_token_id is None:
+    tokenizer.pad_token_id = tokenizer.eos_token_id
 
 # load model
 model = AutoModelForCausalLM.from_pretrained(model_path, trust_remote_code=True, torch_dtype=torch.bfloat16)
@@ -85,8 +89,19 @@ if __name__ == "__main__":
         # multi_round_qa_dataset = load_from_disk(multi_round_qa_human_dataset_path)
         multi_round_qa_dataset = load_dataset(huggingface_dataset_path)["train"].filter(lambda x: x["dataset"] == dataset_name_short)
         
-        # filter to contain only length level <= 8
-        multi_round_qa_dataset = multi_round_qa_dataset.filter(lambda x: x["total_length_level"] <= 8)
+        # calculate the length with the current tokenizer
+        multi_round_qa_dataset = multi_round_qa_dataset.map(
+            lambda x: multi_round_qa_to_length(
+                entry=x,
+                tokenizer=tokenizer,
+                prompt_format=prompt_format,
+                question_format=question_format,
+                answer_format=answer_format
+            )
+        )
+
+        # filter to contain only length level <= max_length
+        multi_round_qa_dataset = multi_round_qa_dataset.filter(lambda x: x["total_length_level"] <= args.max_length_level)
 
         if len(multi_round_qa_dataset) > max_dataitem:
             print(f"Warning: Dataset too long, truncate the dataset to {max_dataitem}")

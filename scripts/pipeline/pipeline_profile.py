@@ -28,9 +28,6 @@ def Grad_Collect(model, tokenizer, args, data=None, max_length=2048, user_prefix
 
     grad_W_dict = {}
 
-    # use the first 200 data samples only. filter
-    data = data.select(range(200))
-
     if 'total_length_level' in data.column_names:
         data = data.filter(lambda x: (x['total_length_level'] <= args.total_length_level) and (x['total_length_level'] > args.total_length_level - args.total_length_level_down))
 
@@ -188,7 +185,7 @@ parser.add_argument('--weight_gradient', action='store_true', help='whether to c
 parser.add_argument('--loss_type', choices=['cross_entropy', 'ppl'], default='cross_entropy', help='loss type')
 parser.add_argument('--dtype', choices=['fp32', 'fp16', 'bf16'], default='bf16')
 parser.add_argument('--aggregating_block_size', type=int, default=64, help='block size for aggregating attention matrix')
-parser.add_argument('--total_length_level_down', type=int, default=2)
+parser.add_argument('--total_length_level_down', type=int, default=2, help="the token lengths passed in for profiling is max_length - total_length_level_down * 1024")
 parser.add_argument('--sort', action='store_true', help='whether to sort the data by length')
 
 args = parser.parse_args()
