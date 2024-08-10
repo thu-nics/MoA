@@ -324,6 +324,8 @@ class LlamaMixtureAttention(LlamaAttention):
             head_index=head_index,
             attention_mask=this_attention_mask,
             attention_dropout=0.0,
+            sink_size=past_key_value.static_cache_size[self.layer_idx],
+            local_size=past_key_value.circular_cache_size[self.layer_idx],
         )
         ### end modification ###
 
