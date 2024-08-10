@@ -19,9 +19,22 @@ class TestMixtureOfSparseAttention(unittest.TestCase):
         # cls.gen_data_func = torch.ones
         cls.implementations = ["sdpa", "moa"]
 
+    def buld_head_index(self, num_head_for_each_group, cache_size_for_each_group):
+        num_group = len(num_head_for_each_group)
+        current_index = 0
+        head_index = [current_index]
+        for group_id in range(num_group):
+            num_heads = num_head_for_each_group[group_id]
+            cache_size = cache_size_for_each_group[group_id]
+            for i in range(num_heads):
+                current_index += cache_size
+                head_index.append(current_index)
+        return torch.tensor(head_index, dtype=torch.int64, device=self.device).contiguous()
+
+
     def test_prefill_stage(self):
         """Test the prefill stage of the mixture_of_sparse_attention function with different implementations."""
-        bsz, num_heads, seq_len, hidden_dim = 2, 4, 10, 64
+        bsz, num_heads, seq_len, hidden_dim = 2, 4, 128, 64
         sm_scale = 0.1
         attention_dropout = 0.0
 
@@ -29,11 +42,25 @@ class TestMixtureOfSparseAttention(unittest.TestCase):
         k = self.gen_data_func(bsz, num_heads, seq_len, hidden_dim, dtype=torch.float16, device=self.device)
         v = self.gen_data_func(bsz, num_heads, seq_len, hidden_dim, dtype=torch.float16, device=self.device)
 
+        num_head_for_each_group = [2, 2]
+        assert num_heads == sum(num_head_for_each_group)
+        cache_size_for_each_group = [128, 128]
+        head_index = self.buld_head_index(num_head_for_each_group, cache_size_for_each_group)
+
+        global_cache_size_uniform = 64
+        global_cache_size = torch.tensor([global_cache_size_uniform for h in range(num_heads)], dtype=torch.int64, device=self.device).contiguous()
+        
+        local_cache_size = []
+        for group_id, num_head in enumerate(num_head_for_each_group):
+            for head_id in range(num_head):
+                local_cache_size.append(cache_size_for_each_group[group_id] - global_cache_size_uniform)
+        local_cache_size = torch.tensor(local_cache_size, dtype=torch.int64, device=self.device).contiguous()
+        
         output = dict()
         for implementation in self.implementations:
             print(f"Testing prefill with implementation: {implementation}")
             output[implementation] = mixture_of_sparse_attention(
-                q, k, v, sm_scale, attention_dropout=attention_dropout, implementation=implementation
+                q, k, v, sm_scale, attention_dropout=attention_dropout, implementation=implementation, local_size=local_cache_size, sink_size=global_cache_size, head_index=head_index,
             )
             # Check shape
             self.assertEqual(output[implementation].shape, (bsz, seq_len, num_heads, hidden_dim))

@@ -275,17 +275,6 @@ class _adapt_mixture_of_sparse_attention(torch.autograd.Function):
                         is_causal=attention_mask is None and q_len > 1,
                     )  # shape (bsz, q_len, num_heads, hidden_dim)
 
-                elif _decode_attn_implementation == "triton":
-                    # use triton implementation of flashattention2
-                    causal = True
-                    this_attn_output = _attention.apply(
-                        this_q,
-                        this_k,
-                        this_v,
-                        causal,
-                        sm_scale,
-                    )
-
                 else:
                     raise NotImplementedError
 
@@ -350,14 +339,14 @@ class _adapt_mixture_of_sparse_attention(torch.autograd.Function):
             # return sparse_attention_prefill(q, k, v, sm_scale, lut, BLOCK_M, BLOCK_N)
 
 def mixture_of_sparse_attention(
-    query,
-    key,
-    value,
-    sm_scale,
-    head_index=None,
-    attention_mask=None,
-    attention_dropout=0.0,
-    implementation="moa",
+    query: Tensor,
+    key: Tensor,
+    value: Tensor,
+    sm_scale: float,
+    head_index: Tensor = None,
+    attention_mask: LongTensor = None,
+    attention_dropout: float = 0.0,
+    implementation: str = "moa",
     sink_size: LongTensor=None,
     local_size: LongTensor=None,
 ):
@@ -380,7 +369,7 @@ def mixture_of_sparse_attention(
             BLOCK_N = 64
             return _sparse_attention_moa_prefill.apply(
                 query, key, value, sm_scale, sink_size // BLOCK_N, local_size // BLOCK_N, BLOCK_M, BLOCK_N,
-            )
+            ).transpose(1, 2)
         else:
             return _mixture_of_sparse_attention_decode.apply(
                 query, key, value, head_index, sm_scale, causal
