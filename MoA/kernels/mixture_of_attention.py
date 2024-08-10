@@ -23,6 +23,11 @@ from MoA.attention.cache_utils import StaticCircularCache
 from MoA.kernels.flash_decoding_moa import _mixture_of_sparse_attention_decode
 from MoA.kernels.block_sparse_attention_lut import _sparse_attention_moa_prefill
 
+try:
+    from flashdecoding import llama2_decode_attn_layer_moa_fwd
+except ImportError:
+    print("Module 'flashdecoding' is not available. efficient sparse decoding is not supported.")
+
 """
 used by FlashAttention2
 """
@@ -343,10 +348,11 @@ def mixture_of_sparse_attention(
     key: Tensor,
     value: Tensor,
     sm_scale: float,
-    head_index: Tensor = None,
     attention_mask: LongTensor = None,
     attention_dropout: float = 0.0,
     implementation: str = "moa",
+    head_start_index: LongTensor=None,
+    head_valid_length: LongTensor=None,
     sink_size: LongTensor=None,
     local_size: LongTensor=None,
 ):
@@ -359,10 +365,15 @@ def mixture_of_sparse_attention(
     is_prefill = not (key.shape[-2] > query.shape[-2])
     # implementation = "sdpa" if (implementation == "moa" and is_prefill) else implementation
 
-    if implementation in ["sdpa", "flash_attention2"]: # noqa
+    if implementation in ["sdpa", "flash_attention2"]: # noqa, only used for debug purpose
+        if is_prefill:
+            head_index = None
+        else:
+            head_index = StaticCircularCache.head_start_index_valid_length_to_head_index(head_start_index, head_valid_length)
         return _adapt_mixture_of_sparse_attention.apply(
             query, key, value, sm_scale, head_index, attention_mask, attention_dropout, "sdpa"
         )
+    
     elif implementation == "moa":
         if is_prefill:
             BLOCK_M = 64
@@ -371,8 +382,22 @@ def mixture_of_sparse_attention(
                 query, key, value, sm_scale, sink_size // BLOCK_N, local_size // BLOCK_N, BLOCK_M, BLOCK_N,
             ).transpose(1, 2)
         else:
-            return _mixture_of_sparse_attention_decode.apply(
-                query, key, value, head_index, sm_scale, causal
-            ).transpose(1, 2)
+            # Triton Implementation of MoA sparse decode
+            # return _mixture_of_sparse_attention_decode.apply(
+            #     query, key, value, head_index, sm_scale, causal
+            # ).transpose(1, 2)
+            # prefill
+            batch_size = query.shape[0]
+            qk_max = 8.0
+            return llama2_decode_attn_layer_moa_fwd(
+                query.transpose(1, 2), # TODO: avoid this transpose for further speedup
+                key,
+                value,
+                head_start_index,
+                head_valid_length,
+                batch_size, 
+                sm_scale, 
+                qk_max,
+            )
     else:
         raise NotImplementedError

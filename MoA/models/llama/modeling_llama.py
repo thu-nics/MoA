@@ -36,7 +36,6 @@ from MoA.attention.permutation_utils import (
     get_lut_band_size,
     moa_config_to_permutation,
 )
-
 from MoA.attention.density_calculation import streamingllm_attention_density, streamingllm_kv_cache_density
 
 logger = logging.get_logger(__name__)
@@ -313,19 +312,32 @@ class LlamaMixtureAttention(LlamaAttention):
         ### begin modification ###
         assert self.training == False, "only support inference now"
         if isinstance(past_key_value, StaticCircularCache):
-            head_index = past_key_value.head_index[self.layer_idx]
+            # head_index = past_key_value.head_index[self.layer_idx]
+            # used for prefill
+            sink_size = past_key_value.static_cache_size[self.layer_idx]
+            local_size = past_key_value.circular_cache_size[self.layer_idx]
+            # used for decode
+            head_start_index = past_key_value.cache_head_start_index[self.layer_idx]
+            head_valid_length = past_key_value.cache_valid_length[self.layer_idx]
         else:
-            head_index = None
+            # head_index = None
+            sink_size = None
+            local_size = None
+            head_start_index = None
+            head_valid_length = None
+
+        # support both sparse prefill and decode
         attn_output = mixture_of_sparse_attention(
             query_states,
             key_states,
             value_states,
             sm_scale=self.head_dim**-0.5,
-            head_index=head_index,
             attention_mask=this_attention_mask,
             attention_dropout=0.0,
-            sink_size=past_key_value.static_cache_size[self.layer_idx],
-            local_size=past_key_value.circular_cache_size[self.layer_idx],
+            sink_size=sink_size,
+            local_size=local_size,
+            head_start_index=head_start_index,
+            head_valid_length=head_valid_length,
         )
         ### end modification ###
 
