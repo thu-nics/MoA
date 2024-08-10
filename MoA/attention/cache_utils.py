@@ -5,6 +5,7 @@ import pandas as pd
 import torch
 import math
 import torch_scatter
+from torch import Tensor
 
 class NewDynamicCache(Cache):
     def __init__(
@@ -28,11 +29,11 @@ class NewDynamicCache(Cache):
 
     def update(
         self,
-        key_states: torch.Tensor,
-        value_states: torch.Tensor,
+        key_states: Tensor,
+        value_states: Tensor,
         layer_idx: int,
         cache_kwargs: Optional[Dict[str, Any]] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[Tensor, Tensor]:
         # Update the number of seen tokens
         if layer_idx == 0:
             self.seen_tokens += key_states.shape[-2]
@@ -74,13 +75,13 @@ class StreamingllmDynamicCache(Cache):
     """
 
     def __init__(self) -> None:
-        self.key_cache: List[torch.Tensor] = []
-        self.value_cache: List[torch.Tensor] = []
+        self.key_cache: List[Tensor] = []
+        self.value_cache: List[Tensor] = []
         self.seen_tokens = (
             0  # Used in `generate` to keep tally of how many tokens the cache has seen
         )
 
-    def __getitem__(self, layer_idx: int) -> List[Tuple[torch.Tensor]]:
+    def __getitem__(self, layer_idx: int) -> List[Tuple[Tensor]]:
         """
         Support for backwards-compatible `past_key_value` indexing, e.g. `past_key_value[0][0].shape[2]` to get the
         sequence length.
@@ -109,21 +110,21 @@ class StreamingllmDynamicCache(Cache):
 
     def update(
         self,
-        key_states: torch.Tensor,
-        value_states: torch.Tensor,
+        key_states: Tensor,
+        value_states: Tensor,
         layer_idx: int,
         cache_kwargs: Optional[Dict[str, Any]] = None,
         update_seen_tokens: Optional[int] = None,
         global_size: Optional[int] = None,
         band_size: Optional[int] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[Tensor, Tensor]:
         """
         Updates the cache with the new `key_states` and `value_states` for the layer `layer_idx`.
 
         Parameters:
-            key_states (`torch.Tensor`):
+            key_states (`Tensor`):
                 The new key states to cache.
-            value_states (`torch.Tensor`):
+            value_states (`Tensor`):
                 The new value states to cache.
             layer_idx (`int`):
                 The index of the layer to cache the states for.
@@ -208,16 +209,16 @@ class LayerCache(Cache):
         self.global_size = global_size
         self.band_size = band_size
         self.pattern_index = pattern_index
-        self.key_cache: List[torch.Tensor] = []
-        self.value_cache: List[torch.Tensor] = []
+        self.key_cache: List[Tensor] = []
+        self.value_cache: List[Tensor] = []
 
         self.replace_index = [self.global_size[i] for i in range(self.pattern_num)]
 
     def update(
         self,
-        key_states: torch.Tensor,
-        value_states: torch.Tensor,
-    ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
+        key_states: Tensor,
+        value_states: Tensor,
+    ) -> Tuple[List[Tensor], List[Tensor]]:
         """
         key_states, value_states : [bz, num_heads, seq_len, head_dim]
         currently, after the first insert, the size of key_cache and value_cache will be fixed
@@ -275,7 +276,7 @@ class LayerCache(Cache):
 
             return self.key_cache, self.value_cache
 
-    def seperate_states(self, states: torch.Tensor) -> List[torch.Tensor]:
+    def seperate_states(self, states: Tensor) -> List[Tensor]:
         """
         states: [bz, num_heads, seq_len, head_dim]
         """
@@ -293,8 +294,8 @@ class CircularCacheSingle(Cache):
     def __init__(
         self,
     ) -> None:
-        self.key_cache: List[torch.Tensor] = []
-        self.value_cache: List[torch.Tensor] = []
+        self.key_cache: List[Tensor] = []
+        self.value_cache: List[Tensor] = []
         self.seen_tokens = (
             0  # Used in `generate` to keep tally of how many tokens the cache has seen\
         )
@@ -303,7 +304,7 @@ class CircularCacheSingle(Cache):
         self.replace_index = []
         self.kv_len = []
 
-    def __getitem__(self, layer_idx: int) -> List[Tuple[torch.Tensor]]:
+    def __getitem__(self, layer_idx: int) -> List[Tuple[Tensor]]:
         """
         Support for backwards-compatible `past_key_value` indexing, e.g. `past_key_value[0][0].shape[2]` to get the
         sequence length.
@@ -332,20 +333,20 @@ class CircularCacheSingle(Cache):
 
     def update(
         self,
-        key_states: torch.Tensor,
-        value_states: torch.Tensor,
+        key_states: Tensor,
+        value_states: Tensor,
         layer_idx: int,
         global_size: Optional[int] = None,
         band_size: Optional[int] = None,
         cache_kwargs: Optional[Dict[str, Any]] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[Tensor, Tensor]:
         """
         Updates the cache with the new `key_states` and `value_states` for the layer `layer_idx`.
 
         Parameters:
-            key_states (`torch.Tensor`):
+            key_states (`Tensor`):
                 The new key states to cache.
-            value_states (`torch.Tensor`):
+            value_states (`Tensor`):
                 The new value states to cache.
             layer_idx (`int`):
                 The index of the layer to cache the states for.
@@ -578,8 +579,8 @@ class CircularCache(Cache):
 
     def update(
         self,
-        key_states: List[torch.Tensor],
-        value_states: List[torch.Tensor],
+        key_states: List[Tensor],
+        value_states: List[Tensor],
         layer_idx: int,
         global_size: Optional[List[int]] = None,
         band_size: Optional[List[int]] = None,
@@ -694,15 +695,15 @@ class StaticCircularCache(Cache):
             ]
 
         self.cache_max_length: List[torch.LongTensor] = [
-            torch.tensor(cache_size_this_layer, device=device, dtype=torch.int64)
+            Tensor(cache_size_this_layer, device=device, dtype=torch.int64)
             for cache_size_this_layer in cache_size
         ]
         self.static_cache_size: List[torch.LongTensor] = [
-            torch.tensor(static_size_this_layer, device=device, dtype=torch.int64)
+            Tensor(static_size_this_layer, device=device, dtype=torch.int64)
             for static_size_this_layer in static_size
         ]
         self.circular_cache_size: List[torch.LongTensor] = [
-            torch.tensor(
+            Tensor(
                 cache_size_this_layer - static_size_this_layer,
                 device=device,
                 dtype=torch.int64,
@@ -729,7 +730,7 @@ class StaticCircularCache(Cache):
                         + cache_size[layer_id][head_id - 1]
                     )
         self.cache_head_start_index = [
-            torch.tensor(
+            Tensor(
                 head_start_index[layer_id], device=self.device, dtype=torch.int64
             )[None, :]
             .expand(batch_size, self.num_head_for_each_layer[layer_id])
@@ -743,12 +744,12 @@ class StaticCircularCache(Cache):
                 head_start_index[layer_id][-1] + cache_size[layer_id][-1]
             )
         self.head_index = [
-            torch.tensor(head_start_index[layer_id], dtype=torch.int64, device=device)
+            Tensor(head_start_index[layer_id], dtype=torch.int64, device=device)
             for layer_id in range(self.num_layers)
         ]  # shape: (num_heads+1) * num_layers, the starting index of each head in each layer; contains the additional index to show the end of the cache
 
         self.circular_cache_head_index: List[torch.LongTensor] = [
-            torch.tensor(
+            Tensor(
                 [
                     head_start_index[layer_id][head_id] + static_size[layer_id][head_id]
                     for head_id in range(self.num_head_for_each_layer[layer_id])
@@ -760,7 +761,7 @@ class StaticCircularCache(Cache):
         ]  # the starting index of the circular part of each head in each layer
 
         self.cache_update_index: List[torch.LongTensor] = [
-            torch.tensor(
+            Tensor(
                 head_start_index[layer_id][:-1], dtype=torch.int64, device=device
             ).expand(batch_size, -1)
             for layer_id in range(self.num_layers)
@@ -779,7 +780,7 @@ class StaticCircularCache(Cache):
             0 for _ in range(self.num_layers)
         ]  # the length of the key and value cache for each layer
 
-        self.key_cache: List[torch.Tensor] = [
+        self.key_cache: List[Tensor] = [
             torch.zeros(
                 batch_size,
                 total_cache_size_this,
@@ -789,7 +790,7 @@ class StaticCircularCache(Cache):
             )
             for total_cache_size_this in self.layer_cache_size
         ]
-        self.value_cache: List[torch.Tensor] = [
+        self.value_cache: List[Tensor] = [
             torch.zeros(
                 batch_size,
                 total_cache_size_this,
@@ -815,17 +816,55 @@ class StaticCircularCache(Cache):
         ]
 
     @staticmethod
+    def head_start_index_valid_length_to_head_index(
+        head_start_index: Tensor,
+        head_valid_length: Tensor,
+    ) -> Tensor:
+        """
+        Convert the starting index and valid length of each head to the head index.
+        """
+        assert (head_start_index == head_start_index[0]).all().item()
+        assert (head_valid_length == head_valid_length[0]).all().item()
+        head_index = torch.cat((head_start_index[0], (head_start_index[0][-1]+head_valid_length[0][-1]).reshape(-1))) # head_index = past_key_value.head_index[self.layer_idx]
+        return head_index.contiguous()
+
+    @staticmethod
+    def head_index_to_head_start_index_valid_length(
+        head_index: Tensor,
+        batch_size: int = 1,
+    ) -> Tuple[Tensor, Tensor]:
+        """
+        Convert the head index to the starting index and valid length of each head.
+        """
+        # valid length is more complex than head_index
+        raise NotImplementedError
+    
+        # Calculate head_start_index from head_index
+        head_start_index = head_index[:-1]
+
+        # Calculate head_valid_length from head_index
+        # The length of each segment is the difference between consecutive entries in head_index
+        head_valid_length = head_index[1:] - head_index[:-1]
+
+        # expand by batch size
+        head_start_index = head_start_index[None, :].expand(batch_size, -1)
+        head_valid_length = head_valid_length[None, :].expand(batch_size, -1)
+
+        return head_start_index.contiguous(), head_valid_length.contiguous()
+
+
+    @staticmethod
     def to_uncontigious(
-        tensor: torch.Tensor,
-        head_index: torch.Tensor,
-    ) -> List[torch.Tensor]:
+        tensor: Tensor,
+        head_index: Tensor,
+    ) -> List[Tensor]:
         """
         Split the tensor to each head according to the head_index
 
         Parameters:
-            tensor (`torch.Tensor`):
+            tensor (`Tensor`):
                 The expected shape for each tensor is `[batch_size, \sum_h^H cache_size_of_head_h , head_dim]`.
-            head_index (`torch.Tensor`):
+            head_index (`Tensor`):
                 The starting index of each head, shape (num_heads+1).
 
         Return:
@@ -838,17 +877,17 @@ class StaticCircularCache(Cache):
 
     @staticmethod
     def to_group_contigious(
-        tensor: torch.Tensor,
-        head_index: torch.Tensor,
-    ) -> List[torch.Tensor]:
+        tensor: Tensor,
+        head_index: Tensor,
+    ) -> List[Tensor]:
         """
         Split the tensor into each group, where heads within the group share the same cache size.
 
         Parameters:
-            tensor (`torch.Tensor`):
+            tensor (`Tensor`):
                 The expected shape for each tensor is either `[batch_size, \sum_h^H cache_size_of_head_h, head_dim]`
                 or `[batch_size, \sum_h^H cache_size_of_head_h]`.
-            head_index (`torch.Tensor`):
+            head_index (`Tensor`):
                 The starting index of each head, shape (num_heads+1).
 
         Return:
@@ -902,19 +941,19 @@ class StaticCircularCache(Cache):
 
     def update(
         self,
-        key_states: torch.Tensor,
-        value_states: torch.Tensor,
+        key_states: Tensor,
+        value_states: Tensor,
         layer_idx: int,
-        # position_ids: torch.Tensor, # can be used to move the sink part to the left side
+        # position_ids: Tensor, # can be used to move the sink part to the left side
         attention_mask: Optional[torch.IntTensor] = None,
         cache_kwargs: Optional[Dict[str, Any]] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[Tensor, Tensor]:
         """
         Parameters:
-            key_states (`torch.Tensor`):
+            key_states (`Tensor`):
                 The expected shapes for each key_states or value_states are
                     `[batch_size, num_heads, seq_len, head_dim]`.
-            value_states (`torch.Tensor`):
+            value_states (`Tensor`):
                 The expected shapes for each key_states or value_states are
                     `[batch_size, num_heads, seq_len, head_dim]`.
             layer_idx (`int`):
@@ -927,7 +966,8 @@ class StaticCircularCache(Cache):
             A tuple containing the updated key and value states. The expected shapes for each key_states or value_states are `[batch_size, \sum_h^H cache_size_of_head_h , head_dim]`.
         """
         assert layer_idx < self.num_layers
-        assert key_states.shape[1] == self.num_head_for_each_layer[layer_idx]
+        if key_states is not None:
+            assert key_states.shape[1] == self.num_head_for_each_layer[layer_idx]
 
         # if do not update cache content, key and value may be None
         if self.update_cache_content:

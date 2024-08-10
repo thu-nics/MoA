@@ -7,6 +7,7 @@ Run tests for the mixture_of_sparse_attention function.
 import unittest
 import torch
 from MoA.kernels.mixture_of_attention import mixture_of_sparse_attention  # Adjust import according to your project structure
+from MoA.attention.cache_utils import StaticCircularCache
 
 class TestMixtureOfSparseAttention(unittest.TestCase):
     @classmethod
@@ -31,7 +32,6 @@ class TestMixtureOfSparseAttention(unittest.TestCase):
                 head_index.append(current_index)
         return torch.tensor(head_index, dtype=torch.int64, device=self.device).contiguous()
 
-
     def test_prefill_stage(self):
         """Test the prefill stage of the mixture_of_sparse_attention function with different implementations."""
         bsz, num_heads, seq_len, hidden_dim = 2, 4, 128, 64
@@ -49,25 +49,31 @@ class TestMixtureOfSparseAttention(unittest.TestCase):
 
         global_cache_size_uniform = 64
         global_cache_size = torch.tensor([global_cache_size_uniform for h in range(num_heads)], dtype=torch.int64, device=self.device).contiguous()
-        
+
         local_cache_size = []
         for group_id, num_head in enumerate(num_head_for_each_group):
             for head_id in range(num_head):
                 local_cache_size.append(cache_size_for_each_group[group_id] - global_cache_size_uniform)
         local_cache_size = torch.tensor(local_cache_size, dtype=torch.int64, device=self.device).contiguous()
-        
+
         output = dict()
         for implementation in self.implementations:
             print(f"Testing prefill with implementation: {implementation}")
             output[implementation] = mixture_of_sparse_attention(
-                q, k, v, sm_scale, attention_dropout=attention_dropout, implementation=implementation, local_size=local_cache_size, sink_size=global_cache_size, head_index=head_index,
+                q,
+                k,
+                v,
+                sm_scale,
+                attention_dropout=attention_dropout,
+                implementation=implementation,
+                local_size=local_cache_size,
+                sink_size=global_cache_size,
             )
             # Check shape
             self.assertEqual(output[implementation].shape, (bsz, seq_len, num_heads, hidden_dim))
 
         # Assert equality across different implementations
         torch.testing.assert_close(output[self.implementations[0]], output[self.implementations[1]], rtol=1e-3, atol=1e-3)
-
 
     def test_decode_stage(self):
         """Test the decode stage of the mixture_of_sparse_attention function."""
@@ -109,11 +115,21 @@ class TestMixtureOfSparseAttention(unittest.TestCase):
         head_index = torch.tensor(head_index, dtype=torch.int64, device=self.device).contiguous()
         sm_scale = sum(num_head_for_each_group)**-0.5
 
+        head_start_index, head_valid_length = StaticCircularCache.head_index_to_head_start_index_valid_length(head_index, batch_size=bsz)
+
         output = dict()
         for implementation in self.implementations:
             print("implement with ", implementation)
             output[implementation] = mixture_of_sparse_attention(
-                q, k, v, sm_scale, head_index=head_index, attention_mask=None, attention_dropout=0.0, implementation=implementation,
+                q,
+                k,
+                v,
+                sm_scale,
+                attention_mask=None,
+                attention_dropout=0.0,
+                head_start_index=head_start_index,
+                head_valid_length=head_valid_length,
+                implementation=implementation,
             )
             # check shape
             self.assertEqual(output[implementation].shape, (bsz, q_len, num_heads, hidden_dim))
@@ -134,4 +150,3 @@ class TestMixtureOfSparseAttention(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main(defaultTest='TestMixtureOfSparseAttention.test_decode_stage')
-
