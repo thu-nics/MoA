@@ -471,7 +471,7 @@ class _sparse_attention_decode(torch.autograd.Function):
 
 
 @triton.jit
-def _sparse_attention_prefill_fwd_kernel_wo_lut(
+def _sparse_attention_prefill_moa_fwd_kernel(
     Q, K, V, sm_scale,
     Out,
     sink, # [H,]
@@ -554,65 +554,70 @@ def _sparse_attention_prefill_fwd_kernel_wo_lut(
     #         VALID_NNZ += 1
     num_sink = tl.load(sink + head_id).to(tl.int32)
     num_local = tl.load(local + head_id).to(tl.int32)
-    num_blocks = N_CTX / BLOCK_N
+
+    max_block_idx = start_m * BLOCK_M // BLOCK_N
+    min_local_idx = tl.maximum(0, max_block_idx + 1 - num_local)
+    max_sink_idx = tl.minimum(num_sink - 1, max_block_idx)
     
-    
+    # Assuming min_local, max_sink, and other variables are defined outside this snippet
     present_nnz_id = 0
-    # loop over k, v and update accumulator
-    while(present_nnz_id < num_blocks):
-        min_local = tl.max(0, present_nnz_id + 1 - num_local)
-        max_sink = tl.min(num_sink - 1, present_nnz_id)
-        if (present_nnz_id > max_sink and present_nnz_id < min_local):
-            continue
-        # we use nnz_id to indicate which block will be computed
-        start_n = present_nnz_id * BLOCK_N
-        start_n = tl.multiple_of(start_n, BLOCK_N) # hint for compiler
-        present_nnz_id = present_nnz_id.to(tl.int32)
-        # -- compute qk ----
-        k = tl.load(tl.advance(K_block_ptr, (0, start_n)), boundary_check=(0, 1), padding_option="zero") # skip boundary_check and do it in qk -> p
-        # k = tl.load(tl.advance(K_block_ptr, (0, start_n)))
-        qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
-        qk += tl.dot(q, k)
-        qk = tl.where(offs_m[:, None] >= (start_n + offs_n[None, :]), qk, float("-inf")) # mask the upper triangular part
-        qk = tl.where((offs_m[:, None] < N_CTX) & ((start_n + offs_n)[None, :] < N_CTX), qk, float("-inf")) # mask the part that exceed N_CTX
+  
+    while(present_nnz_id <= max_block_idx):
+        if (present_nnz_id > max_sink_idx and present_nnz_id < min_local_idx):
+            pass
+        else:
+            # loop over k, v and update accumulator
+            # we use nnz_id to indicate which block will be computed
+            start_n = present_nnz_id * BLOCK_N
+            start_n = tl.multiple_of(start_n, BLOCK_N) # hint for compiler
+            present_nnz_id = present_nnz_id.to(tl.int32)
+            # -- compute qk ----
+            k = tl.load(tl.advance(K_block_ptr, (0, start_n)), boundary_check=(0, 1), padding_option="zero") # skip boundary_check and do it in qk -> p
+            # k = tl.load(tl.advance(K_block_ptr, (0, start_n)))
+            qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
+            qk += tl.dot(q, k)
+            qk = tl.where(offs_m[:, None] >= (start_n + offs_n[None, :]), qk, float("-inf")) # mask the upper triangular part
+            qk = tl.where((offs_m[:, None] < N_CTX) & ((start_n + offs_n)[None, :] < N_CTX), qk, float("-inf")) # mask the part that exceed N_CTX
 
-        # -- compute m_ij, p, l_ij
-        m_ij = tl.max(qk, 1)
+            # -- compute m_ij, p, l_ij
+            m_ij = tl.max(qk, 1)
 
-        p = tl.math.exp2(qk - m_ij[:, None])
-        # if a blcok has a row filled with "inf" (e.g., in the upper triangular), then m_ij == '-inf'. In this case, p should be set to '0', or exp2('inf') will trigger NaN
-        p = tl.where(m_ij[:, None] == tl.full((BLOCK_M, BLOCK_N), float("-inf"), tl.float32), 0.0, tl.math.exp2(qk - m_ij[:, None])) # ignore the blocks in upper triangular part, which is indicated by last_nnz_id
-        p = p * (last_nnz_id!=present_nnz_id) # ignore the blocks in upper triangular part, which is indicated by last_nnz_id
+            p = tl.math.exp2(qk - m_ij[:, None])
+            # if a blcok has a row filled with "inf" (e.g., in the upper triangular), then m_ij == '-inf'. In this case, p should be set to '0', or exp2('inf') will trigger NaN
+            p = tl.where(m_ij[:, None] == tl.full((BLOCK_M, BLOCK_N), float("-inf"), tl.float32), 0.0, tl.math.exp2(qk - m_ij[:, None])) # ignore the blocks in upper triangular part, which is indicated by last_nnz_id
+            p = p * (last_nnz_id!=present_nnz_id) # ignore the blocks in upper triangular part, which is indicated by last_nnz_id
 
-        l_ij = tl.sum(p, 1)
+            l_ij = tl.sum(p, 1)
 
-        # -- update m_i and l_i
-        m_i_new = tl.maximum(m_i, m_ij)
-        alpha = tl.math.exp2(m_i - m_i_new)
-        beta = tl.math.exp2(m_ij - m_i_new)
-        l_i *= alpha
-        l_i_new = l_i + beta * l_ij
+            # -- update m_i and l_i
+            m_i_new = tl.maximum(m_i, m_ij)
+            alpha = tl.math.exp2(m_i - m_i_new)
+            beta = tl.math.exp2(m_ij - m_i_new)
+            l_i *= alpha
+            l_i_new = l_i + beta * l_ij
 
-        # scale p
-        p_scale = beta / l_i_new
-        p = p * p_scale[:, None]
+            # scale p
+            p_scale = beta / l_i_new
+            p = p * p_scale[:, None]
 
-        # scale acc
-        acc_scale = l_i / l_i_new
-        acc = acc * acc_scale[:, None]
+            # scale acc
+            acc_scale = l_i / l_i_new
+            acc = acc * acc_scale[:, None]
 
-        # update acc
-        v = tl.load(tl.advance(V_block_ptr, (start_n, 0)), boundary_check=(0, 1), padding_option="zero") # make sure that the last block is padded with zero
-        p = p.to(tl.float16)
-        acc += tl.dot(p, v)
+            # update acc
+            v = tl.load(tl.advance(V_block_ptr, (start_n, 0)), boundary_check=(0, 1), padding_option="zero") # make sure that the last block is padded with zero
+            p = p.to(tl.float16)
+            acc += tl.dot(p, v)
 
-        # update m_i and l_i
-        l_i = l_i_new
-        m_i = m_i_new
+            # update m_i and l_i
+            l_i = l_i_new
+            m_i = m_i_new
 
-        # update last_nnz_id
-        last_nnz_id = present_nnz_id
+            # update last_nnz_id
+            last_nnz_id = present_nnz_id
+
         present_nnz_id += 1
+        
 
     # write back l and m
     # l_ptrs = L + off_hz * N_CTX + offs_m
@@ -623,7 +628,7 @@ def _sparse_attention_prefill_fwd_kernel_wo_lut(
     # write back O
     tl.store(O_block_ptr, acc.to(tl.float16), boundary_check=(0, 1))
 
-class _sparse_attention_wo_lut_prefill(torch.autograd.Function):
+class _sparse_attention_moa_prefill(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, q, k, v, sm_scale, sink, local, BLOCK_M: int = 64, BLOCK_N: int = 64) -> torch.Tensor:
@@ -669,7 +674,7 @@ class _sparse_attention_wo_lut_prefill(torch.autograd.Function):
         num_stages = 4 if BLOCK_M <= 32 else 2
 
         # ------------------------------- #
-        _sparse_attention_prefill_fwd_kernel_wo_lut[grid](
+        _sparse_attention_prefill_moa_fwd_kernel[grid](
             q, k ,v, sm_scale,
             o,
             sink,
@@ -681,7 +686,8 @@ class _sparse_attention_wo_lut_prefill(torch.autograd.Function):
             q.shape[0], q.shape[1], q.shape[2],
             BLOCK_M=BLOCK_M, BLOCK_DMODEL=Lk, BLOCK_N=BLOCK_N, 
             num_warps=num_warps,
-            num_stages=num_stages)
+            num_stages=num_stages
+        )
         # ------------------------------- #
 
         # after computation, remove padding from the output

@@ -7,7 +7,7 @@ This is a Triton implementation of the Mixture of Sparse Attention (MoA) kernel.
 """
 
 import torch
-from torch import Tensor
+from torch import Tensor, LongTensor
 from torch import nn
 import torch.nn.functional as F
 from transformers.modeling_attn_mask_utils import (
@@ -21,6 +21,7 @@ from typing import Optional, Union, List
 
 from MoA.attention.cache_utils import StaticCircularCache
 from MoA.kernels.flash_decoding_moa import _mixture_of_sparse_attention_decode
+from MoA.kernels.block_sparse_attention_lut import _sparse_attention_moa_prefill
 
 """
 used by FlashAttention2
@@ -357,6 +358,8 @@ def mixture_of_sparse_attention(
     attention_mask=None,
     attention_dropout=0.0,
     implementation="moa",
+    sink_size: LongTensor=None,
+    local_size: LongTensor=None,
 ):
     """
     Wrapper for the Triton implementation of the Mixture of Sparse Attention (MoA) kernel to support keyword arguments.
@@ -365,15 +368,22 @@ def mixture_of_sparse_attention(
     causal = True
 
     is_prefill = not (key.shape[-2] > query.shape[-2])
-    implementation = "sdpa" if (implementation == "moa" and is_prefill) else implementation
+    # implementation = "sdpa" if (implementation == "moa" and is_prefill) else implementation
 
-    if implementation in ["sdpa", "flash_attention2", "triton"]: # noqa
+    if implementation in ["sdpa", "flash_attention2"]: # noqa
         return _adapt_mixture_of_sparse_attention.apply(
             query, key, value, sm_scale, head_index, attention_mask, attention_dropout, "sdpa"
         )
     elif implementation == "moa":
-        return _mixture_of_sparse_attention_decode.apply(
-            query, key, value, head_index, sm_scale, causal
-        ).transpose(1, 2)
+        if is_prefill:
+            BLOCK_M = 64
+            BLOCK_N = 64
+            return _sparse_attention_moa_prefill.apply(
+                query, key, value, sm_scale, sink_size // BLOCK_N, local_size // BLOCK_N, BLOCK_M, BLOCK_N,
+            )
+        else:
+            return _mixture_of_sparse_attention_decode.apply(
+                query, key, value, head_index, sm_scale, causal
+            ).transpose(1, 2)
     else:
         raise NotImplementedError
