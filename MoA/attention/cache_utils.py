@@ -695,15 +695,15 @@ class StaticCircularCache(Cache):
             ]
 
         self.cache_max_length: List[torch.LongTensor] = [
-            Tensor(cache_size_this_layer, device=device, dtype=torch.int64)
+            torch.tensor(cache_size_this_layer, device=device, dtype=torch.int64)
             for cache_size_this_layer in cache_size
         ]
         self.static_cache_size: List[torch.LongTensor] = [
-            Tensor(static_size_this_layer, device=device, dtype=torch.int64)
+            torch.tensor(static_size_this_layer, device=device, dtype=torch.int64)
             for static_size_this_layer in static_size
         ]
         self.circular_cache_size: List[torch.LongTensor] = [
-            Tensor(
+            torch.tensor(
                 cache_size_this_layer - static_size_this_layer,
                 device=device,
                 dtype=torch.int64,
@@ -730,7 +730,7 @@ class StaticCircularCache(Cache):
                         + cache_size[layer_id][head_id - 1]
                     )
         self.cache_head_start_index = [
-            Tensor(
+            torch.tensor(
                 head_start_index[layer_id], device=self.device, dtype=torch.int64
             )[None, :]
             .expand(batch_size, self.num_head_for_each_layer[layer_id])
@@ -744,12 +744,12 @@ class StaticCircularCache(Cache):
                 head_start_index[layer_id][-1] + cache_size[layer_id][-1]
             )
         self.head_index = [
-            Tensor(head_start_index[layer_id], dtype=torch.int64, device=device)
+            torch.tensor(head_start_index[layer_id], dtype=torch.int64, device=device)
             for layer_id in range(self.num_layers)
         ]  # shape: (num_heads+1) * num_layers, the starting index of each head in each layer; contains the additional index to show the end of the cache
 
         self.circular_cache_head_index: List[torch.LongTensor] = [
-            Tensor(
+            torch.tensor(
                 [
                     head_start_index[layer_id][head_id] + static_size[layer_id][head_id]
                     for head_id in range(self.num_head_for_each_layer[layer_id])
@@ -761,7 +761,7 @@ class StaticCircularCache(Cache):
         ]  # the starting index of the circular part of each head in each layer
 
         self.cache_update_index: List[torch.LongTensor] = [
-            Tensor(
+            torch.tensor(
                 head_start_index[layer_id][:-1], dtype=torch.int64, device=device
             ).expand(batch_size, -1)
             for layer_id in range(self.num_layers)
