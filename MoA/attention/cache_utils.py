@@ -654,11 +654,11 @@ class StaticCircularCache(Cache):
         self,
         cache_size: List[List[int]],
         batch_size: int = 1,
-        head_dim: int = 64,
+        head_dim: int = 128,
         static_size: Optional[List[List[int]]] = None,
-        device="cpu",
-        dtype=None,
-        update_cache_content=True,
+        device: torch.device = "cpu",
+        dtype: torch.dtype = None,
+        update_cache_content: bool = True,
     ) -> None:
         """
         Parameters:
@@ -969,6 +969,22 @@ class StaticCircularCache(Cache):
         if key_states is not None:
             assert key_states.shape[1] == self.num_head_for_each_layer[layer_idx]
 
+        # move the tensors to correct devices for multi-gpu inference
+        device = key_states.device
+        assert value_states.device == device, "key_states and value_states should be on the same device"
+        if attention_mask is not None:
+            assert attention_mask.device == device, "attention_mask should be on the same device as key_states"
+        self.key_cache[layer_idx] = self.key_cache[layer_idx].to(device=device)
+        self.value_cache[layer_idx] = self.value_cache[layer_idx].to(device=device)
+        self.mask_cache[layer_idx] = self.mask_cache[layer_idx].to(device=device)
+        self.cache_update_index[layer_idx] = self.cache_update_index[layer_idx].to(device=device)
+        self.cache_head_start_index[layer_idx] = self.cache_head_start_index[layer_idx].to(device=device)
+        self.circular_cache_head_index[layer_idx] = self.circular_cache_head_index[layer_idx].to(device=device)
+        self.cache_valid_length[layer_idx] = self.cache_valid_length[layer_idx].to(device=device)
+        self.cache_max_length[layer_idx] = self.cache_max_length[layer_idx].to(device=device)
+        self.circular_cache_size[layer_idx] = self.circular_cache_size[layer_idx].to(device=device)
+        self.static_cache_size[layer_idx] = self.static_cache_size[layer_idx].to(device=device)
+
         # if do not update cache content, key and value may be None
         if self.update_cache_content:
             batch_size = key_states.shape[0]
@@ -992,7 +1008,7 @@ class StaticCircularCache(Cache):
                 layer_idx
             ]  # shape (batch_size, num_heads)
             batch_index = torch.arange(
-                start=0, end=batch_size, device=self.device, dtype=torch.int64
+                start=0, end=batch_size, device=device, dtype=torch.int64
             ).unsqueeze(
                 1
             )  # to index shape (batch_size, num_heads, ...)
@@ -1039,7 +1055,7 @@ class StaticCircularCache(Cache):
                 ]  # shape: [batch_size, seq_len]
             else:
                 attention_mask = torch.ones(
-                    (batch_size, seq_len), dtype=torch.int64, device=self.device
+                    (batch_size, seq_len), dtype=torch.int64, device=device
                 )  # shape: [batch_size, seq_len]
             advancing_pos = (
                 torch.cumsum(attention_mask, dim=-1, dtype=torch.int64) - 1
@@ -1081,7 +1097,7 @@ class StaticCircularCache(Cache):
                 0, 2, 1
             )  # shape: (batch_size, num_heads, seq_len), value are in the realm of num_heads * seq_len
             batch_index = (
-                torch.arange(batch_size, device=self.device)[:, None, None]
+                torch.arange(batch_size, device=device)[:, None, None]
                 .expand(-1, num_head, seq_len)
                 .contiguous()
             )  # shape: (batch_size, num_heads, seq_len)
