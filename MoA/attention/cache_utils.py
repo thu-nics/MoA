@@ -1155,8 +1155,8 @@ def moa_config_to_cache_config(
     max_new_token: int = 1024,
     sink_size: int = 64,
     minimum_cache_size: int = 128,
-    verbose: bool = True,
     split_size: bool = 64,
+    verbose: bool = True,
 ):
     """
     Convert the MoA configuration to the cache configuration
@@ -1167,11 +1167,13 @@ def moa_config_to_cache_config(
         seq_len (int):
             The sequence length.
         max_new_token (int, optional):
-            The maximum number of new tokens. Defaults to 1024.
+            The maximum number of new tokens. The N used to calculate cache size for each head equals seq_len + max_new_token. Defaults to 1024.
         sink_size (int, optional):
             The sink size. Defaults to 64.
         minimum_cache_size (int, optional):
             The minimum cache size. Defaults to 128.
+        split_size (int, optional):
+            The cache size of each head should be a multiple of this number. Defaults to 64.
         verbose (bool, optional):
             Whether to print the cache configuration summary. Defaults to True.
 
@@ -1211,12 +1213,12 @@ def moa_config_to_cache_config(
                     {
                         "layer_id": layer_id,
                         "head_id": head_id,
-                        "raw_cache_size": seq_len,
+                        "raw_cache_size": seq_len + max_new_token,
                         "cache_size": cache_size_dict[layer_id][head_id],
                         "static_size": static_size_dict[layer_id][head_id],
                         "circular_size": cache_size_dict[layer_id][head_id]
                         - static_size_dict[layer_id][head_id],
-                        "ratio": cache_size_dict[layer_id][head_id] / seq_len,
+                        "ratio": cache_size_dict[layer_id][head_id] / (seq_len + max_new_token),
                     }
                 )
         summary = pd.DataFrame(summary)

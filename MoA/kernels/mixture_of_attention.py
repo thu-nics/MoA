@@ -349,11 +349,11 @@ def mixture_of_sparse_attention(
     sm_scale: float,
     attention_mask: LongTensor = None,
     attention_dropout: float = 0.0,
-    implementation: str = "moa",
     head_start_index: LongTensor=None,
     head_valid_length: LongTensor=None,
     sink_size: LongTensor=None,
     local_size: LongTensor=None,
+    implementation: str = "moa",
 ):
     """
     Wrapper for the Triton implementation of the Mixture of Sparse Attention (MoA) kernel to support keyword arguments.
@@ -367,7 +367,7 @@ def mixture_of_sparse_attention(
         sm_scale (`float`):
             The scaling factor for the attention scores.
         attention_mask (`torch.Tensor`, *optional*):
-            TBD
+            TBD. Currently, do not support customized attention mask
         attention_dropout (`float`, *optional*):
             The dropout rate for the attention scores.
         implementation (`str`, *optional*):
@@ -385,17 +385,16 @@ def mixture_of_sparse_attention(
         The output tensor of shape `(batch_size, query_length, num_heads, head_dim)`.
     """
     causal = True
-
     is_prefill = not (key.shape[-2] > query.shape[-2])
-    # implementation = "sdpa" if (implementation == "moa" and is_prefill) else implementation
-
+    
     if implementation in ["sdpa", "flash_attention2"]: # noqa, only used for debug purpose
         if is_prefill:
             head_index = None
         else:
             head_index = StaticCircularCache.head_start_index_valid_length_to_head_index(head_start_index, head_valid_length)
+        # use dense prefill and sparse decode with flash attention 1 or 2
         return _adapt_mixture_of_sparse_attention.apply(
-            query, key, value, sm_scale, head_index, attention_mask, attention_dropout, "sdpa"
+            query, key, value, sm_scale, head_index, attention_mask, attention_dropout, implementation
         )
 
     elif implementation == "moa":

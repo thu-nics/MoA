@@ -104,11 +104,12 @@ def LlamaModel_MixtureAttention_forward(
             head_dim = self.config.hidden_size // self.config.num_attention_heads
             cache_config = moa_config_to_cache_config(
                 self.moa_config,
-                seq_length,
-                max_new_token=0,
+                seq_len=seq_length,
+                max_new_token=1024,
                 sink_size=64,
                 minimum_cache_size=128,
-                verbose=True,
+                split_size=64,
+                verbose=self.moa_verbose if hasattr(self, "moa_verbose") else False, # set to True if you want to see the cache sizes
             )
             past_key_values = StaticCircularCache(
                 **cache_config,
@@ -203,10 +204,10 @@ def LlamaModel_MixtureAttention_forward(
 
     ### only pass the hidden_states of last seq length
     # ! you can pass only the hidden_states of last seq length for better performance
+    last_hidden_only = self.last_hidden_only if hasattr(self, "last_hidden_only") else False
+        
     return BaseModelOutputWithPast(
-        last_hidden_state=hidden_states,
-        ## use this to past only the hidden_states of last seq length
-        # last_hidden_state=hidden_states[:, -1:, :],
+        last_hidden_state=hidden_states if not last_hidden_only else hidden_states[:, -1:, :], # use this to past only the hidden_states of the last token to lm_head to reduce peak memory
         past_key_values=next_cache,
         hidden_states=all_hidden_states,
         attentions=all_self_attns,
@@ -338,7 +339,7 @@ class LlamaMixtureAttention(LlamaAttention):
             local_size=local_size,
             head_start_index=head_start_index,
             head_valid_length=head_valid_length,
-        )
+        ) # shape: (bsz, q_len, num_heads, head_dim)
         ### end modification ###
 
         attn_output = attn_output.reshape(bsz, q_len, self.hidden_size).contiguous()
@@ -351,15 +352,31 @@ def LlamaModel_set_mixture_of_attention(
     self,
     moa_config: Dict,
     permute_head: bool = False,
-    sparse_prefill: bool = False,
-    sparse_decode: bool = True,
-    device: Optional[str] = None,
+    moa_verbose: bool = False,
+    last_hidden_only: bool = True,
+    sparse_prefill: bool = True,
 ):
     """
     Set the mixture of attention of the model
+
+    Args:
+        moa_config: a dictionary containing the configuration of the mixture of attention
+            keys:
+                alphas: a list of list of int, the alpha of each head in each layer
+                betas: a list of list of float, the beta of each head in each layer
+        permute_head: bool, whether to permute the heads to make the heads with the same cache size to be adjacent
+        moa_verbose: bool, whether to print the cache size of each head
+        last_hidden_only: bool, whether to pass only the hidden_states of the last token to lm_head to reduce peak memory
+        sparse_prefill: bool, whether to use sparse prefill
     """
     # update forward functions
-    self.forward = MethodType(LlamaModel_MixtureAttention_forward, self)  # rename later
+    self.forward = MethodType(LlamaModel_MixtureAttention_forward, self)
+
+    # addtional setups
+    self.moa_verbose = moa_verbose
+    self.last_hidden_only = last_hidden_only
+
+    assert sparse_prefill, "only support sparse prefill now. modify the implementation in `mixture_of_attention` if you want to use dense prefill"
 
     # update functions in LlamaAttention
     for layer in self.layers:
@@ -369,7 +386,7 @@ def LlamaModel_set_mixture_of_attention(
 
     alphas: Union[List[List[int]], List[Tensor]] = moa_config["alphas"]
     betas: Union[List[List[float]], List[Tensor]] = moa_config["betas"]
-    # block_size: int = moa_config['block_size']
+    # block_size: int = moa_config['block_size'] # set to 64 for now
 
     def permute_head_func(
         self,
@@ -405,7 +422,8 @@ def LlamaModel_set_mixture_of_attention(
 
 
 """
-efficient block sparse llama attention using lut
+Deprecated
+Efficient block sparse llama attention using lut
 """
 from MoA.kernels.block_sparse_attention_lut import sparse_attention
 
