@@ -399,6 +399,8 @@ def mixture_of_sparse_attention(
 
     elif implementation == "moa":
         if is_prefill:
+            # note that qkv are not contiguous for prefill
+
             BLOCK_M = 64
             BLOCK_N = 64
             """
@@ -412,7 +414,7 @@ def mixture_of_sparse_attention(
             CUDA Implementation of MoA sparse prefill
             """
             return moa_prefill(
-                query.transpose(1, 2).contiguous(),
+                query.transpose(1, 2),
                 key,
                 value,
                 causal=True,
@@ -435,7 +437,7 @@ def mixture_of_sparse_attention(
             batch_size = query.shape[0]
             qk_max = 8.0
             return llama2_decode_attn_layer_moa_fwd(
-                query.transpose(1, 2), # TODO: avoid this transpose for further speedup
+                query.transpose(1, 2).contiguous(), # TODO: avoid this transpose for further speedup
                 key,
                 value,
                 head_start_index,
