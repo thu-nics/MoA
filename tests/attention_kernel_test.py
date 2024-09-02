@@ -34,7 +34,7 @@ class TestMixtureOfSparseAttention(unittest.TestCase):
 
     def test_prefill_stage(self):
         """Test the prefill stage of the mixture_of_sparse_attention function with different implementations."""
-        bsz, num_heads, seq_len, hidden_dim = 2, 4, 128, 64
+        bsz, num_heads, seq_len, hidden_dim = 2, 4, 128, 128
         sm_scale = 0.1
         attention_dropout = 0.0
 
@@ -77,7 +77,7 @@ class TestMixtureOfSparseAttention(unittest.TestCase):
 
     def test_decode_stage(self):
         """Test the decode stage of the mixture_of_sparse_attention function."""
-        bsz, q_len, hidden_dim = 2, 1, 16  # Assuming q_len = 1 for decode stage
+        bsz, q_len, hidden_dim = 2, 1, 128  # Assuming q_len = 1 for decode stage
 
         # num_head_for_each_group = [8, 4]
         # cache_size_for_each_group = [64, 128]

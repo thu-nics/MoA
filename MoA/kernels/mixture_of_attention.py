@@ -2,7 +2,7 @@
 Mixture of Sparse Attention
 ===============
 
-This is a Triton implementation of the Mixture of Sparse Attention (MoA) kernel.
+This is the interface for the Mixture of Sparse Attention (MoA) kernels.
 
 """
 
@@ -25,6 +25,7 @@ from MoA.kernels.block_sparse_attention_lut import _sparse_attention_moa_prefill
 
 try:
     from flashdecoding import llama2_decode_attn_layer_moa_fwd
+    from flashinfer import moa_prefill
 except ImportError:
     print("Module 'flashdecoding' is not available. efficient sparse decoding is not supported.")
 
@@ -164,7 +165,7 @@ def _upad_input(query_layer, key_layer, value_layer, attention_mask, query_lengt
 
 
 """
-used by MoA
+Example of how MoA attention can be implemented using FlashAttention
 """
 
 class _adapt_mixture_of_sparse_attention(torch.autograd.Function):
@@ -290,8 +291,6 @@ class _adapt_mixture_of_sparse_attention(torch.autograd.Function):
                 attn_output = torch.cat(attn_output, dim=1).transpose(1, 2)
             elif _decode_attn_implementation == "flash_attention2":
                 attn_output = torch.cat(attn_output, dim=2)
-            elif _decode_attn_implementation == "triton":
-                attn_output = torch.cat(attn_output, dim=1).transpose(1, 2)
             else:
                 raise NotImplementedError
 
@@ -358,8 +357,33 @@ def mixture_of_sparse_attention(
 ):
     """
     Wrapper for the Triton implementation of the Mixture of Sparse Attention (MoA) kernel to support keyword arguments.
+
+    Args:
+        query (`torch.Tensor`):
+            The query tensor of shape `(batch_size, num_heads, query_length, head_dim)`.
+        key, value (`torch.Tensor`):
+            For prefill, the key and value tensors are of shape `(batch_size, num_heads, key_length, head_dim)`.
+            For sparse decode, the key and value tensors are of shape `(batch_size, \sum_H num_cache_heads_h, head_dim)`, which means different cache heads are concatenated as a single dimention.
+        sm_scale (`float`):
+            The scaling factor for the attention scores.
+        attention_mask (`torch.Tensor`, *optional*):
+            TBD
+        attention_dropout (`float`, *optional*):
+            The dropout rate for the attention scores.
+        implementation (`str`, *optional*):
+            The implementation of the MoA kernel to use. Defaults to `"moa"`.
+        head_start_index (`torch.Tensor`, *optional*):
+            The starting index of the heads in the cache.
+        head_valid_length (`torch.Tensor`, *optional*):
+            The valid length of the heads in the cache.
+        sink_size (`torch.Tensor`, *optional*):
+            The sink size for the MoA kernel.
+        local_size (`torch.Tensor`, *optional*):
+            The local size for the MoA kernel.
+
+    Returns:
+        The output tensor of shape `(batch_size, query_length, num_heads, head_dim)`.
     """
-    # TODO: support contigious cache memory
     causal = True
 
     is_prefill = not (key.shape[-2] > query.shape[-2])
@@ -373,20 +397,42 @@ def mixture_of_sparse_attention(
         return _adapt_mixture_of_sparse_attention.apply(
             query, key, value, sm_scale, head_index, attention_mask, attention_dropout, "sdpa"
         )
-    
+
     elif implementation == "moa":
         if is_prefill:
             BLOCK_M = 64
             BLOCK_N = 64
-            return _sparse_attention_moa_prefill.apply(
-                query, key, value, sm_scale, sink_size // BLOCK_N, local_size // BLOCK_N, BLOCK_M, BLOCK_N,
-            ).transpose(1, 2)
+            """
+            Triton Implementation of MoA sparse prefill
+            """
+            # return _sparse_attention_moa_prefill.apply(
+            #     query, key, value, sm_scale, sink_size // BLOCK_N, local_size // BLOCK_N, BLOCK_M, BLOCK_N,
+            # ).transpose(1, 2)
+
+            """
+            CUDA Implementation of MoA sparse prefill
+            """
+            return moa_prefill(
+                query.transpose(1, 2).contiguous(),
+                key,
+                value,
+                causal=True,
+                num_global_blocks=sink_size // BLOCK_N,
+                num_band_blocks=local_size // BLOCK_N,
+                kv_layout="HND",
+            )
+
         else:
-            # Triton Implementation of MoA sparse decode
+            """
+            Triton Implementation of MoA sparse decode
+            """
             # return _mixture_of_sparse_attention_decode.apply(
             #     query, key, value, head_index, sm_scale, causal
             # ).transpose(1, 2)
-            # prefill
+
+            """
+            CUDA Implementation of MoA sparse decode
+            """
             batch_size = query.shape[0]
             qk_max = 8.0
             return llama2_decode_attn_layer_moa_fwd(
