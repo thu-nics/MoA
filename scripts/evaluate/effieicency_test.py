@@ -43,7 +43,8 @@ parser.add_argument('--moa_config', type=str, default=None, help='the path to mo
 parser.add_argument('--num_iters', type=int, default=1)
 parser.add_argument('--batch_size', type=int, default=1)
 parser.add_argument('--decode_len', type=int, default=None, help='decoding max len. if None, just do prefilling')
-parser.add_argument('--attention_implementation', type=str, default='sdpa')
+parser.add_argument('--attention_implementation', type=str, choices=['sdpa', 'eager'], default='sdpa',
+                    help="Choose the type of attention implementation to use: 'sdpa' or 'eager'.")
 parser.add_argument('--profiler', action='store_true')
 parser.add_argument('--cuda_event', action='store_true')
 parser.add_argument('--cuda_cache', action="store_true")
@@ -140,7 +141,7 @@ def run_model(num_iters=5, device="cuda:0"):
             moa_config = json.load(f)
         # Add mixture of sparse attention capability to the model
         model = update_model_function(model, args.model_name)
-        model.model.set_mixture_of_attention(moa_config, permute_head=True)
+        model.model.set_mixture_of_attention(moa_config, permute_head=True, moa_verbose=False)
 
     test_file = 'data/70_lines.jsonl'
     with open(test_file, 'r') as f:

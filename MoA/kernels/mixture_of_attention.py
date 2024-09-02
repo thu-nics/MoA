@@ -414,7 +414,7 @@ def mixture_of_sparse_attention(
             CUDA Implementation of MoA sparse prefill
             """
             return moa_prefill(
-                query.transpose(1, 2),
+                query.transpose(1, 2).contiguous(),
                 key,
                 value,
                 causal=True,
