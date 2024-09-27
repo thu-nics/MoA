@@ -39,9 +39,14 @@ pip install -r requirements.txt
 pip install -e .
 ```
 
+## Kind Note on Cloning the Repository
+
+If you have trouble cloning the repo, it is probably because the repo's git-lfs is too large. You can safely skip the downloading of git-lfs with `git clone --no-checkout <repo_url>`.
+
 ## Quick Start: Use Pre-defined Plans
 
 If you prefer not to perform the automatic compression plan search steps and want immediate results, we provide pre-compressed configurations for the `lmsys/vicuna-{size}-v1.5-16k` models (7B and 13B versions). These can be found in the `.json` files under the `examples` directory.
+
 You can directly go to `Evaluation` section to evaluate the model with the plans. 
 If you want to compress other models, you can follow the `Automatic Search Pipeline` section to compress the model by yourself.
 

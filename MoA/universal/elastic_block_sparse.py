@@ -1,6 +1,6 @@
 import torch
 from torch import Tensor
-from typing import Tuple, Dict, Optional, Union
+from typing import Tuple, Dict, Optional, Union, List
 from tqdm import tqdm
 import pandas as pd
 import torch.nn.functional as F
@@ -139,7 +139,7 @@ class ElasticBlockSparse(ElasticGenerator):
             layout = layout * causal_layout if is_causal else layout
 
             # calculate density
-            density = self._calculate_density(layout)
+            density = self._layout_to_density(layout)
             density_list.append(density)
 
             # calculate loss
@@ -202,7 +202,7 @@ class ElasticBlockSparse(ElasticGenerator):
                 layout = layout * causal_layout if self.is_causal else layout
 
                 # calculate density
-                density = self._calculate_density(layout)
+                density = self._layout_to_density(layout)
                 density_list.append(density)
             
         density_tensor = torch.tensor(density_list).repeat(keep_dim, 1)
@@ -228,7 +228,30 @@ class ElasticBlockSparse(ElasticGenerator):
             config_id = self.config_id
         return torch.tensor(self.config['density'])[config_id]
     
-    def config_id_to_plan(self, config_id: Tensor, shape: Union[Tuple[int, int], Tuple[int, int, int]], **kwargs) -> Tensor:
+    def config_id_to_plan(self, config_id: Tensor, shape: Tuple[int, int], **kwargs) -> Dict:
+        """
+        Hardware agnostic.
+        Input:
+            config_id: Tensor of shape [keep_dim, 1], indicating the config id of each plan
+        Output:
+            plan: json file of alpha and beta
+        """
+        num_layer, num_head = shape
+
+        plan_config = {'alphas': [], 'betas': []}
+        for id in config_id:
+            plan_config['alphas'].append(self.config['alpha'][id])
+            plan_config['betas'].append(self.config['beta'][id])
+
+        # reshape as list of list, each inner list is a layer, each element is a head
+        output_config= {'alphas': [], 'betas': []}
+        for key in plan_config.keys():
+            for i in range(num_layer):
+                output_config[key].append(plan_config[key][i*num_head:(i+1)*num_head])
+
+        return output_config
+
+    def config_id_to_layout(self, config_id: Tensor, shape: Union[Tuple[int, int], Tuple[int, int, int]], **kwargs) -> Tensor:
         """
         Hardware agnostic.
         Input:
@@ -260,7 +283,24 @@ class ElasticBlockSparse(ElasticGenerator):
         return layout_output
     
     @staticmethod
-    def _calculate_density(layout: Tensor, mode="kv") -> float:
+    def _config_to_density(config: Dict[str, List[List[float]]], length: int) -> float:
+        """
+        Calculate the density of the config under a length
+        N = alpha + beta * N
+        Input:
+            config: Dict of config
+            length: int, the length of the sequence
+        """
+        alphas = torch.tensor(config['alphas']).reshape(-1)
+        betas = torch.tensor(config['betas']).reshape(-1)
+
+        density = torch.mean((alphas + betas * length).to(float) / length).item()
+        
+        return density
+
+
+    @staticmethod
+    def _layout_to_density(layout: Tensor, mode="kv") -> float:
         """
         Calculate the density of the layout.
         Input:

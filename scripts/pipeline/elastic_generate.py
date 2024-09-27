@@ -3,8 +3,9 @@ from tqdm import tqdm
 import numpy as np
 import pandas as pd
 import os
-import cvxpy as cp
+import json
 import argparse
+from collections import defaultdict
 
 from MoA.universal.elastic_block_sparse import ElasticBlockSparse
 
@@ -71,10 +72,10 @@ block_sparse_generator = ElasticBlockSparse(
     accuracy_loss_ratio=1.0
 )
 
-elastic_length = args.elastic_length
-extend_length = args.extend_length
+elastic_length: list = args.elastic_length
+extend_length: list = args.extend_length
 density_bounds = args.density_bounds
-output_length = args.output_length
+output_length: list = args.output_length
 
 max_profile_length=max(elastic_length)
 max_token_length=max(elastic_length + extend_length + output_length)
@@ -275,34 +276,46 @@ def elastic_output_plan(block_sparse_generator, optimize_config_ids, output_leng
     pd.DataFrame(torch.sum(opt_importance_loss, dim=(-1)).numpy()).to_csv(os.path.join(output_dir, 'opt_importance_loss.csv'))
 
     for plan_id in range(num_plan):
-        # output the plan at all length
-        for token_length in output_length:
-            print(f"Token Length: {token_length}")
-            num_block = token_length // block_size
-            optimize_config_id = optimize_config_ids[plan_id].reshape(-1,1)
-            layout = block_sparse_generator.config_id_to_plan(optimize_config_id, shape=(token_length, token_length))
-            if same_per_layer:
-                layout = layout.reshape(profile_num_layer, 1, num_block, num_block).expand(-1, profile_num_head, -1, -1)
-            else:
-                layout = layout.reshape(profile_num_layer, profile_num_head, num_block, num_block)
-            # print density
-            causal_layout = gen_causal_pattern(num_block, num_block, dtype=torch.bool)
+        optimize_config_id = optimize_config_ids[plan_id].reshape(-1,1)
+        moa_config = block_sparse_generator.config_id_to_plan(optimize_config_id, shape=(profile_num_layer, profile_num_head if not same_per_layer else 1))
 
-            density: float = block_sparse_generator._calculate_density(layout)
-            print(f"Average Density {density}")
+        # save as file
+        moa_config_path = os.path.join(output_dir, f'moa_config_plan_{plan_id}.json')
+        print(f"Save moa config to {moa_config_path}")
+        with open(moa_config_path, 'w') as f:
+            json.dump(moa_config, f)
 
-            # save as file
-            # convert to lut and save
-            lut = layout_to_lut_single_density(layout)
-            if args.save_layout:
+        # show densities for lengths
+        density_dict = dict()
+        for length in elastic_length + extend_length + output_length:
+            density = block_sparse_generator._config_to_density(moa_config, length=length)
+            density_dict[length] = density
+        print("Density", {k: f"{v:.3f}" for k, v in density_dict.items()})
+
+        # convert to lut and save
+        if args.save_layout:
+            for token_length in output_length:
+                # output the plan at all length
+                print(f"Token Length: {token_length}")
+
+                num_block = token_length // block_size
+
+                layout = block_sparse_generator.plan_config_to_layout(optimize_config_id, shape=(token_length, token_length))
+
+                if same_per_layer:
+                    layout = layout.reshape(profile_num_layer, 1, num_block, num_block).expand(-1, profile_num_head, -1, -1)
+                else:
+                    layout = layout.reshape(profile_num_layer, profile_num_head, num_block, num_block)
+                # print density
+                causal_layout = gen_causal_pattern(num_block, num_block, dtype=torch.bool)
+                
                 layout_path = os.path.join(output_dir, f'layout_{token_length}_plan_{plan_id}.pt')
                 print(f"Save layout to {layout_path}")
                 torch.save(layout, layout_path)
-            if args.num_key_value_groups > 1:
-                lut = [layer_lut.repeat_interleave(args.num_key_value_groups, dim=0) for layer_lut in lut]
-            lut_path = os.path.join(output_dir, f'lut_{token_length}_plan_{plan_id}.pt')
-            print(f"Save lut to {lut_path}")
-            torch.save(lut, lut_path)
+
+                density: float = block_sparse_generator._layout_to_density(layout)
+                print(f"Average Density {density}")
+
     print("done")
 
 output_length = args.output_length
