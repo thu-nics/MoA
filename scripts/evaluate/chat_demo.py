@@ -24,8 +24,9 @@ example_prompt = """You are given several news passages. Write a one-page summar
 if __name__ == "__main__":
     # Load the huggingface model
     model_name = args.model_name
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = AutoModelForCausalLM.from_pretrained(model_name, device_map="cuda", torch_dtype=torch.float16)
+    # device_map = "cuda" if torch.cuda.is_available() else "cpu"
+    device_map = "auto"
+    model = AutoModelForCausalLM.from_pretrained(model_name, device_map=device_map, torch_dtype=torch.float16)
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
     if args.moa_config is not None:

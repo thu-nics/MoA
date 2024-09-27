@@ -13,21 +13,16 @@ import torch.nn.functional as F
 from transformers.modeling_attn_mask_utils import (
     _prepare_4d_causal_attention_mask_for_sdpa,
 )
-from transformers.models.llama.modeling_llama import LlamaFlashAttention2
-import math
-import triton
-import triton.language as tl
 from typing import Optional, Union, List
 
 from MoA.attention.cache_utils import StaticCircularCache
+
 from MoA.kernels.flash_decoding_moa import _mixture_of_sparse_attention_decode
 from MoA.kernels.block_sparse_attention_lut import _sparse_attention_moa_prefill
-
 try:
-    from flashdecoding import llama2_decode_attn_layer_moa_fwd
-    from flashinfer import moa_prefill
+    from flashinfer import moa_prefill, moa_decode
 except ImportError:
-    print("Module 'flashdecoding' is not available. efficient sparse decoding is not supported.")
+    print("Module 'flashinfer' is not available. Efficient sparse decoding is not supported. Try switching to our Triton implementation")
 
 """
 used by FlashAttention2
@@ -356,7 +351,8 @@ def mixture_of_sparse_attention(
     implementation: str = "moa",
 ):
     """
-    Wrapper for the Triton implementation of the Mixture of Sparse Attention (MoA) kernel to support keyword arguments.
+    Wrapper for the different implementation of the Mixture of Sparse Attention (MoA) kernel to support keyword arguments. The default implementation is `"moa"`.
+    The attention is default to be "causal".
 
     Args:
         query (`torch.Tensor`):
@@ -373,9 +369,9 @@ def mixture_of_sparse_attention(
         implementation (`str`, *optional*):
             The implementation of the MoA kernel to use. Defaults to `"moa"`.
         head_start_index (`torch.Tensor`, *optional*):
-            The starting index of the heads in the cache.
+            The starting index of the heads in the cache of shape `(batch_size, num_heads)`.
         head_valid_length (`torch.Tensor`, *optional*):
-            The valid length of the heads in the cache.
+            The valid length of the heads in the cache of shape `(batch_size, num_heads)`.
         sink_size (`torch.Tensor`, *optional*):
             The sink size for the MoA kernel.
         local_size (`torch.Tensor`, *optional*):
@@ -384,9 +380,9 @@ def mixture_of_sparse_attention(
     Returns:
         The output tensor of shape `(batch_size, query_length, num_heads, head_dim)`.
     """
-    causal = True
-    is_prefill = not (key.shape[-2] > query.shape[-2])
     
+    is_prefill = not (key.shape[-2] > query.shape[-2])
+
     if implementation in ["sdpa", "flash_attention2"]: # noqa, only used for debug purpose
         if is_prefill:
             head_index = None
@@ -434,17 +430,13 @@ def mixture_of_sparse_attention(
             """
             CUDA Implementation of MoA sparse decode
             """
-            batch_size = query.shape[0]
-            qk_max = 8.0
-            return llama2_decode_attn_layer_moa_fwd(
-                query.transpose(1, 2).contiguous(), # TODO: avoid this transpose for further speedup
+            return moa_decode(
+                query.transpose(1, 2).contiguous(),
                 key,
                 value,
                 head_start_index,
                 head_valid_length,
-                batch_size, 
-                sm_scale, 
-                qk_max,
+                sm_scale,
             )
     else:
         raise NotImplementedError

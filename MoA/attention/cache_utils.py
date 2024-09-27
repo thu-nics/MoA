@@ -4,7 +4,6 @@ from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 import torch
 import math
-import torch_scatter
 from torch import Tensor
 
 class NewDynamicCache(Cache):

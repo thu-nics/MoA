@@ -123,6 +123,8 @@ def export_memory_snapshot() -> None:
 def run_model(num_iters=5, device="cuda:0"):
    
     tokenizer = AutoTokenizer.from_pretrained(args.model_name, trust_remote_code=False, use_fast=False)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
     config = AutoConfig.from_pretrained(args.model_name)
     config._attn_implementation = args.attention_implementation
     config._attn_implementation_internal = args.attention_implementation
