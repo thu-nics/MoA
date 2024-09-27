@@ -41,24 +41,8 @@ pip install -e .
 
 ## Quick Start: Use Pre-defined Plans
 
-If you prefer not to perform the automatic compression plan search steps and want immediate results, we provide pre-compressed configurations for the `lmsys/vicuna-{size}-v1.5-16k` models (7B and 13B versions). These can be found in the `.pt` files under the `examples` directory.
-
-To download the example plans, ensure Git Large File Storage ([LFS](https://git-lfs.com/)) is installed to handle large files. You can install and set it up before cloning this repo. For linux users, do it with:
-
-```bash
-sudo apt-get install git-lfs
-git lfs install
-```
-
-Clone the repo using standard git commands. Git LFS will automatically download the large files. To skip downloading, use `--skip-lfs` option for `git clone`. 
-
-If the `.pt` files under `examples` folder are not automatically downloaded during cloning, retrieve them manually:
-
-```bash
-git lfs pull
-```
-
-After downloading the plan, you can directly go to `Evaluation` section to evaluate the model with the plans. 
+If you prefer not to perform the automatic compression plan search steps and want immediate results, we provide pre-compressed configurations for the `lmsys/vicuna-{size}-v1.5-16k` models (7B and 13B versions). These can be found in the `.json` files under the `examples` directory.
+You can directly go to `Evaluation` section to evaluate the model with the plans. 
 If you want to compress other models, you can follow the `Automatic Search Pipeline` section to compress the model by yourself.
 
 ## Automatic Search Pipeline
@@ -115,7 +99,7 @@ Replace <plan_num> with the number of plans under the directory.
 
 ## Evaluation
 
-We provide the example compression plans under the `examples` directory. You can use them by setting the following `--lut_path` to the `.pt` files under the directory.
+We provide the example compression plans under the `examples` directory. You can use them by setting the following `--moa_config` to the `.json` files under the directory.
 
 ### Apply MoA to LLM
 
@@ -150,13 +134,13 @@ output = pipe(prompt)
 MoA aims to preserve the retrieval ability of the original dense model with a reduced impact on accuracy. To evaluate the retrieval performance of a specific plan at a given input length, use the following command, replacing `{i}` with the actual plan ID:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python scripts/evaluate/retrieval_evaluate.py --model_name lmsys/vicuna-7b-v1.5-16k --lut_path 7b/lut_result/lut_8192_plan_{i}.pt --output_dir 7b/retrieval_8k --length_level 8
+CUDA_VISIBLE_DEVICES=0 python scripts/evaluate/retrieval_evaluate.py --model_name lmsys/vicuna-7b-v1.5-16k --moa_config 7b/lut_result/lut_8192_plan_{i}.json --output_dir 7b/retrieval_8k --length_level 8
 ```
 
 > Alternatively, you can use our example plans. When passing in multiple plans at different lengths, the correct length will be automatically selected according to the input length:
 > 
 > ```bash
-> CUDA_VISIBLE_DEVICES=0 python scripts/evaluate/retrieval_evaluate.py --model_name lmsys/vicuna-7b-v1.5-16k --lut_path examples/lmsys-vicuna-7b-v1.5-16k/lut_4096.pt examples/lmsys-vicuna-7b-v1.5-16k/lut_8192.pt examples/lmsys-vicuna-7b-v1.5-16k/lut_12288.pt examples/lmsys-vicuna-7b-v1.5-16k/lut_16384.pt --output_dir 7b/retrieval_8k --length_level 8
+> CUDA_VISIBLE_DEVICES=0 python scripts/evaluate/retrieval_evaluate.py --model_name lmsys/vicuna-7b-v1.5-16k --moa_config examples/lmsys-vicuna-7b-v1.5-16k/moa_alpha_beta.json --output_dir 7b/retrieval_8k --length_level 8
 > ```
 
 ### LongBench
@@ -165,11 +149,11 @@ MoA strives to maintain the long-context understanding ability of the original d
 
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python scripts/evaluate/longbench_evaluate.py --model_name lmsys/vicuna-7b-v1.5-16k --max_length 3500 --eval longbench_fast --longbench_e --longbench_result_dir 7b/longbench_result --longbench_length_range 0-4k --use_lut --lut_path 7b/lut_result/lut_4096_plan_{i}.pt
+CUDA_VISIBLE_DEVICES=0 python scripts/evaluate/longbench_evaluate.py --model_name lmsys/vicuna-7b-v1.5-16k --max_length 3500 --eval longbench_fast --longbench_e --longbench_result_dir 7b/longbench_result --longbench_length_range 0-4k --moa_config 7b/lut_result/plan_{i}.json
 
-CUDA_VISIBLE_DEVICES=0 python scripts/evaluate/longbench_evaluate.py --model_name lmsys/vicuna-7b-v1.5-16k --max_length 7500 --eval longbench_fast --longbench_e --longbench_result_dir 7b/longbench_result --longbench_length_range 4-8k --use_lut --lut_path 7b/lut_result/lut_8192_plan_{i}.pt
+CUDA_VISIBLE_DEVICES=0 python scripts/evaluate/longbench_evaluate.py --model_name lmsys/vicuna-7b-v1.5-16k --max_length 7500 --eval longbench_fast --longbench_e --longbench_result_dir 7b/longbench_result --longbench_length_range 4-8k --moa_config 7b/lut_result/plan_{i}.json
 
-CUDA_VISIBLE_DEVICES=0 python scripts/evaluate/longbench_evaluate.py --model_name lmsys/vicuna-7b-v1.5-16k --max_length 15500 --eval longbench_fast --longbench_e --longbench_result_dir 7b/longbench_result --longbench_length_range 8k+ --use_lut --lut_path 7b/lut_result/lut_16384_plan_{i}.pt
+CUDA_VISIBLE_DEVICES=0 python scripts/evaluate/longbench_evaluate.py --model_name lmsys/vicuna-7b-v1.5-16k --max_length 15500 --eval longbench_fast --longbench_e --longbench_result_dir 7b/longbench_result --longbench_length_range 8k+ --moa_config 7b/lut_result/plan_{i}.json
 ```
 
 > Alternatively, you can use our example plans.
@@ -179,7 +163,7 @@ CUDA_VISIBLE_DEVICES=0 python scripts/evaluate/longbench_evaluate.py --model_nam
 To chat with the model using the example plans, run the following command:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python scripts/evaluate/chat_demo.py --model_name lmsys/vicuna-7b-v1.5-16k --lut_path examples/lmsys-vicuna-7b-v1.5-16k/lut_4096.pt examples/lmsys-vicuna-7b-v1.5-16k/lut_8192.pt examples/lmsys-vicuna-7b-v1.5-16k/lut_12288.pt examples/lmsys-vicuna-7b-v1.5-16k/lut_16384.pt --batch_size 16
+CUDA_VISIBLE_DEVICES=0 python scripts/evaluate/chat_demo.py --model_name lmsys/vicuna-7b-v1.5-16k --moa_config examples/lmsys-vicuna-7b-v1.5-16k/moa_alpha_beta.json --batch_size 16
 ```
 
 > Currently, the input prompt should have at least 64 tokens.

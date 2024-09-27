@@ -190,7 +190,7 @@ if __name__ == "__main__":
     if args.use_flash_attention:
         config._attn_implementation = "flash_attention_2"
     else:
-        config._attn_implementation_internal = "eager"
+        config._attn_implementation_internal = "sdpa"
 
     # load model
     if args.dtype == 'fp16':
@@ -207,12 +207,10 @@ if __name__ == "__main__":
         config=config,
         device_map="auto",
         attn_implementation=(
-            "eager" if not args.use_flash_attention else "flash_attention_2"
+            "sdpa" if not args.use_flash_attention else "flash_attention_2"
         ),
         torch_dtype=dtype,
     ).eval()
-
-    model = update_model_function(model, args.model_name)
 
     # use sparse decode and permute head
     if args.lut_path is not None:
