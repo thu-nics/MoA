@@ -97,6 +97,12 @@ CUDA_VISIBLE_DEVICES=0 python scripts/pipeline/perplexity_evaluate.py --model_na
 Alternatively, to evaluate all plans within a directory, run the following script:
 
 ```
+scripts/pipeline/validate.sh <moa_config_dir> <moa_config_num> <result_dir> <model_name>
+```
+
+For example
+
+```
 scripts/pipeline/validate.sh 7b/lut_result <plan_num> 7b/validate_result /lmsys/vicuna-7b-v1.5-16k
 ```
 
@@ -175,7 +181,7 @@ CUDA_VISIBLE_DEVICES=0 python scripts/evaluate/chat_demo.py --model_name lmsys/v
 
 ## TODOs
 
-> Due to padding issues in the prefill stage during batch inference, we temporarily switch to dense prefill in this repo for now. You can use sparse prefill without padding by modifying line 302 of `kernels/block_sparse_attention_lut.py`.
+> Due to padding issues in the Triton prefill stage during batch inference, we temporarily switch to dense prefill in this repo for now. You can use sparse prefill without padding by modifying line 302 of `kernels/block_sparse_attention_lut.py`.
 
 - [ ] Support padding in batch inference
 
