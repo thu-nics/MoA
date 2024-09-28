@@ -48,8 +48,10 @@ def process_prompt(input, model, tokenizer, test_case: Dict, output_file: Option
 
     device = getattr(model, "device", "cpu")
     
+    input = input.to(device)
+
     output = model.generate(
-        input.input_ids.to(device), 
+        **input, 
         max_new_tokens=100, 
         use_cache=use_cache,
         eos_token_id=stop_token_ids,
@@ -104,12 +106,6 @@ if __name__ == "__main__":
         "--tokenizer_name", type=str, default=None)
     parser.add_argument(
         "--dtype", type=str, choices=["fp16", "fp32", "bf16"], default="fp16"
-    )
-    parser.add_argument(
-        "--lut_path",
-        nargs="+",
-        type=str,
-        help="List of paths to load efficient attention lut",
     )
     parser.add_argument(
         "--moa_config",
@@ -172,7 +168,7 @@ if __name__ == "__main__":
     parser.add_argument('--dataset_path', type=str, default=None)
     args = parser.parse_args()
 
-    args.use_flash_attention = True if (args.lut_path is None) and (not args.use_streamingLLM) and (not args.h2o) else args.use_flash_attention # noqa: if lut_path is not None, use flash attention
+    args.use_flash_attention = True if (not args.use_streamingLLM) and (not args.h2o) and (args.moa_config is None) else args.use_flash_attention # noqa: if lut_path is not None, use flash attention
     print("using flash attention", args.use_flash_attention)
 
     # load tokenizer
@@ -184,6 +180,8 @@ if __name__ == "__main__":
     )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token_id = tokenizer.eos_token_id
 
     # define model config
     config = AutoConfig.from_pretrained(args.model_name)
@@ -211,21 +209,6 @@ if __name__ == "__main__":
         ),
         torch_dtype=dtype,
     ).eval()
-
-    # use sparse decode and permute head
-    if args.lut_path is not None:
-        block_size = 64
-        sparse_decode = True
-        permute_head = True
-        if args.not_permute_head:
-            permute_head = False
-
-        model.model.use_block_sparse_attention_lut(permute_head, sparse_decode)
-        print("Using lut from {}, block size {}".format(args.lut_path, block_size))
-        print("permute head is set to be {}".format(permute_head))
-        set_static_attention_lut(
-            args.lut_path, None, model.model.layers, block_size, permute_head, sparse_decode,
-        )
     
     if args.moa_config is not None:
         moa_config_path = args.moa_config
@@ -335,7 +318,8 @@ if __name__ == "__main__":
                 continue
 
             # retrieval test
-            is_correct, summary = process_prompt(input, model, tokenizer, data, stop_token_ids=stop_token_ids)
+            with torch.inference_mode():
+                is_correct, summary = process_prompt(input, model, tokenizer, data, stop_token_ids=stop_token_ids)
             
             # record
             pbar.write(f"Prompt_Length: {prompt_length}, Correct: {is_correct}, {summary}")
