@@ -779,13 +779,14 @@ class StaticCircularCache(Cache):
             0 for _ in range(self.num_layers)
         ]  # the length of the key and value cache for each layer
 
+        # initialize as meta tensor to avoid extensive space on single gpu for multi-gpu inference
         self.key_cache: List[Tensor] = [
             torch.zeros(
                 batch_size,
                 total_cache_size_this,
                 head_dim,
                 dtype=self.dtype,
-                device=device,
+                device='meta',
             )
             for total_cache_size_this in self.layer_cache_size
         ]
@@ -795,7 +796,7 @@ class StaticCircularCache(Cache):
                 total_cache_size_this,
                 head_dim,
                 dtype=self.dtype,
-                device=device,
+                device='meta',
             )
             for total_cache_size_this in self.layer_cache_size
         ]
@@ -973,8 +974,12 @@ class StaticCircularCache(Cache):
         assert value_states.device == device, "key_states and value_states should be on the same device"
         if attention_mask is not None:
             assert attention_mask.device == device, "attention_mask should be on the same device as key_states"
-        self.key_cache[layer_idx] = self.key_cache[layer_idx].to(device=device)
-        self.value_cache[layer_idx] = self.value_cache[layer_idx].to(device=device)
+        
+        # instantiate meta tensor to the correct device
+        if self.key_cache[layer_idx].device == torch.device('meta'):
+            self.key_cache[layer_idx] = torch.zeros_like(self.key_cache[layer_idx], device=device)
+        if self.value_cache[layer_idx].device == torch.device('meta'):
+            self.value_cache[layer_idx] = torch.zeros_like(self.value_cache[layer_idx], device=device)
         self.mask_cache[layer_idx] = self.mask_cache[layer_idx].to(device=device)
         self.cache_update_index[layer_idx] = self.cache_update_index[layer_idx].to(device=device)
         self.cache_head_start_index[layer_idx] = self.cache_head_start_index[layer_idx].to(device=device)
