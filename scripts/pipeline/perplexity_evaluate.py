@@ -7,8 +7,7 @@ from typing import List
 from tqdm import tqdm
 from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig
 from datasets import load_dataset, load_from_disk
-import warnings
-import deepspeed
+import json
 
 from MoA.models.interface import update_model_function
 from MoA.dataset.utils import find_subtensor_position
@@ -53,7 +52,7 @@ def evaluate(model, tokenizer, args, user_prefix=None, assistant_prefix=None):
     if not args.load_from_disk:
         for datum in prompt_subset:
             prompt_dict[datum['dataset_names']] = datum
-        
+
     pbar = tqdm(total=num_data, desc="Evaluating")
     for i, data_sample in enumerate(data):
         if i >= data_select_range[1] or i < data_select_range[0]:
@@ -126,37 +125,51 @@ def evaluate(model, tokenizer, args, user_prefix=None, assistant_prefix=None):
             pass
         else:
             raise NotImplementedError
-        
+
         loss_list[original_data_sample['dataset']].append(loss.item())
 
         pbar.update(1)
-    
+
     pbar.close()
 
     return loss_list
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--model_name', type=str, default='lmsys/vicuna-7b-v1.5-16k', help='model name')
-parser.add_argument('--tokenizer_name', type=str, default=None)
-parser.add_argument('--max_length', type=int, default=2048, help='max length of the sequence')
-parser.add_argument('--dataset_dir', type=str, help='dataset directory')
-parser.add_argument('--split', type=str, default=None, help='split of the dataset')
-parser.add_argument('--load_from_disk', action='store_true')
-parser.add_argument('--response_mask', action='store_true', help='whether to mask the response part')
-parser.add_argument('--loss_type', choices=['cross_entropy', 'ppl'], default='cross_entropy', help='loss type')
-parser.add_argument('--dtype', choices=['fp32', 'fp16', 'bf16'], default='fp16')
-parser.add_argument('--lut_path', type=str, default=None)
-parser.add_argument('--block_size', type=int, default=64)
+parser.add_argument(
+    "--model_name", type=str, default="lmsys/vicuna-7b-v1.5-16k", help="model name"
+)
+parser.add_argument("--tokenizer_name", type=str, default=None)
+parser.add_argument(
+    "--max_length", type=int, default=2048, help="max length of the sequence"
+)
+parser.add_argument("--dataset_dir", type=str, help="dataset directory")
+parser.add_argument("--split", type=str, default=None, help="split of the dataset")
+parser.add_argument("--load_from_disk", action="store_true")
+parser.add_argument(
+    "--response_mask", action="store_true", help="whether to mask the response part"
+)
+parser.add_argument(
+    "--loss_type",
+    choices=["cross_entropy", "ppl"],
+    default="cross_entropy",
+    help="loss type",
+)
+parser.add_argument("--dtype", choices=["fp32", "fp16", "bf16"], default="fp16")
+parser.add_argument(
+    "--moa_config",
+    type=str,
+    default=None,
+    help="the path to moa configuration file",
+)
+parser.add_argument("--streamingllm", action="store_true", help="use streamingllm")
+parser.add_argument("--global_size", type=int, default=4, help="global size")
+parser.add_argument("--band_size", type=int, default=2044, help="band size")
+parser.add_argument("--result_path", type=str, default=None, help="result path")
+parser.add_argument("--total_length_level_down", type=int, default=None)
 
-parser.add_argument('--streamingllm', action='store_true', help='use streamingllm')
-parser.add_argument('--global_size', type=int, default=4, help='global size')
-parser.add_argument('--band_size', type=int, default=2044, help='band size')
-parser.add_argument('--result_path', type=str, default=None, help='result path')
-parser.add_argument('--total_length_level_down', type=int, default=None)
-
-parser.add_argument('--h2o', action='store_true', help='use h2o')
-parser.add_argument('--heavy', type=int, default=512)
-parser.add_argument('--recent', type=int, default=512)
+parser.add_argument("--h2o", action="store_true", help="use h2o")
+parser.add_argument("--heavy", type=int, default=512)
+parser.add_argument("--recent", type=int, default=512)
 
 args = parser.parse_args()
 
@@ -182,35 +195,23 @@ if __name__ == '__main__':
     args.total_length_level = args.max_length // 1024
 
     config = AutoConfig.from_pretrained(args.model_name)
-    config._attn_implementation_internal = "sdpa" if args.lut_path is None else "eager"
-    config._attn_implementation = "sdpa" if args.lut_path is None else "eager"
+    config._attn_implementation_internal = "sdpa"
+    config._attn_implementation = "sdpa"
     if args.tokenizer_name is None:
         args.tokenizer_name = args.model_name
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_name)
     if tokenizer.pad_token is None:
         tokenizer.padding_side='right'
         tokenizer.pad_token=tokenizer.eos_token
-    model = AutoModelForCausalLM.from_pretrained(args.model_name, config=config, torch_dtype=dtype, device_map='auto', attn_implementation='sdpa' if args.lut_path is None else 'eager')
-    model = update_model_function(model, args.model_name)
+    model = AutoModelForCausalLM.from_pretrained(args.model_name, config=config, torch_dtype=dtype, device_map='auto', attn_implementation='sdpa')
 
-    if args.lut_path is not None:
-        # use sparse decode and permute head
-        if 'llama-3' in args.model_name.lower():
-            sparse_decode = True
-            permute_head = True
-        else:
-            sparse_decode = True
-            permute_head = True
-        block_size = args.block_size
-        model.model.use_block_sparse_attention_lut(permute_head, sparse_decode)
-        print("Using lut from {}, block size {}".format(args.lut_path, block_size))
-        from MoA.attention.set import (
-            set_static_attention_lut,
-        )
-
-        set_static_attention_lut(
-            args.lut_path, None, model.model.layers, block_size, permute_head, sparse_decode
-        )
+    if args.moa_config is not None:
+        moa_config_path = args.moa_config
+        with open(moa_config_path, 'r') as f:
+            moa_config = json.load(f)
+        # Add mixture of sparse attention capability to the model
+        model = update_model_function(model, args.model_name)
+        model.model.set_mixture_of_attention(moa_config, permute_head=True, last_hidden_only=False) # it is important to set last_hidden_only to False for PPL tests
 
     if args.streamingllm:
         LlamaModel_use_streamingllm_attention(model.model, args.global_size, args.band_size)

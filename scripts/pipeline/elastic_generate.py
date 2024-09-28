@@ -15,34 +15,96 @@ from MoA.attention.convert import layout_to_lut_single_density
 from MoA.attention.pattern import gen_causal_pattern
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--output_dir', type=str, required=True, help='output directory')
-parser.add_argument('--elastic_length', type=int, nargs='+', default=[1024, 2048, 3072, 4096], help='elastic length')
-parser.add_argument('--extend_length', type=int, nargs='+', default=[8192, 16384], help='extend length')
-parser.add_argument('--density_bounds', type=float, nargs='+', default=[1.00, 0.77, 0.58, 0.46, 0.25, 0.13], help='density bounds')
-parser.add_argument('--importance_tensor_dir', type=str, required=True, help='importance tensor directory')
-parser.add_argument('--output_length', type=int, nargs='+', default=[2048, 4096, 8192, 16384], help='output length')
-parser.add_argument('--num_plan_limit', type=int, default=2, help='number of plans to construct')
-parser.add_argument('--num_alphas', type=int, default=None, help='number of alphas')
-parser.add_argument('--alpha', type=float, default=None, help='for uniform extend')
-parser.add_argument('--alpha_interval', type=int, default=1024, help='interval of alpha')
-parser.add_argument('--num_betas', type=int, default=9, help='number of alphas')
-parser.add_argument('--beta', type=float, default=None, help="for uniform extend")
-parser.add_argument('--latency_lower_bound_ratio', type=float, default=0.9, help='the ratio of the lower bound for latency optimization') 
+parser.add_argument("--output_dir", type=str, required=True, help="output directory")
+parser.add_argument(
+    "--elastic_length",
+    type=int,
+    nargs="+",
+    default=[2048, 4096, 8192],
+    help="the profile lengths",
+)
+parser.add_argument(
+    "--extend_length",
+    type=int,
+    nargs="+",
+    default=[16384],
+    help="the length that should also be constraint by density",
+)
+parser.add_argument(
+    "--density_bounds",
+    type=float,
+    nargs="+",
+    default=[0.5, 0.5, 0.5, 0.5],
+    help="density bounds for elastic length and extend length",
+)
+parser.add_argument(
+    "--importance_tensor_dir",
+    type=str,
+    required=True,
+    help="the root directory for importance tensor",
+)
+parser.add_argument(
+    "--output_length",
+    type=int,
+    nargs="+",
+    default=[2048, 4096, 8192, 16384],
+    help="output length",
+)
+parser.add_argument(
+    "--num_plan_limit", type=int, default=2, help="number of plans to construct"
+)
+parser.add_argument("--num_alphas", type=int, default=None, help="number of alphas")
+parser.add_argument("--alpha", type=float, default=None, help="for uniform extend")
+parser.add_argument(
+    "--alpha_interval", type=int, default=1024, help="interval of alpha"
+)
+parser.add_argument("--num_betas", type=int, default=9, help="number of alphas")
+parser.add_argument("--beta", type=float, default=None, help="for uniform extend")
+parser.add_argument(
+    "--latency_lower_bound_ratio",
+    type=float,
+    default=0.9,
+    help="the ratio of the lower bound for latency optimization",
+)
 
-parser.add_argument('--device', type=str, default='cpu', help='device to run the code')
-parser.add_argument('--same_per_layer', action='store_true', help='whether to sum the importance tensor per layer')
+parser.add_argument("--device", type=str, default="cpu", help="device to run the code")
+parser.add_argument(
+    "--same_per_layer",
+    action="store_true",
+    help="whether to sum the importance tensor per layer",
+)
 
-parser.add_argument('--block_size', type=int, default=64)
-parser.add_argument('--aggregating_block_size', type=int, default=64, help='aggregating block size for importance tensor')
+parser.add_argument("--block_size", type=int, default=64)
+parser.add_argument(
+    "--aggregating_block_size",
+    type=int,
+    default=64,
+    help="aggregating block size for importance tensor",
+)
 
-parser.add_argument('--normalize_by_head', action='store_true', help='whether to make loss sum on every head the same')
-parser.add_argument('--normalize_by_layer', action='store_true', help='whether to make the loss sum on every layer the same')
+parser.add_argument(
+    "--normalize_by_head",
+    action="store_true",
+    help="whether to make loss sum on every head the same",
+)
+parser.add_argument(
+    "--normalize_by_layer",
+    action="store_true",
+    help="whether to make the loss sum on every layer the same",
+)
 
-parser.add_argument('--num_key_value_groups', type=int, default=1, help="for group query")
+parser.add_argument(
+    "--num_key_value_groups", type=int, default=1, help="for group query"
+)
 
-parser.add_argument('--save_layout', action='store_true', help='whether to save layout')
+parser.add_argument("--save_layout", action="store_true", help="whether to save layout")
 
-parser.add_argument('--time_limit', type=int, default=None)
+parser.add_argument(
+    "--time_limit",
+    type=int,
+    help="the time limit in seconds for optimizer to solve each single-objective optimization",
+    default=None,
+)
 
 args = parser.parse_args()
 
@@ -77,9 +139,11 @@ extend_length: list = args.extend_length
 density_bounds = args.density_bounds
 output_length: list = args.output_length
 
+all_lengths = elastic_length + extend_length + output_length
+
 max_profile_length=max(elastic_length)
-max_token_length=max(elastic_length + extend_length + output_length)
-min_token_length=min(elastic_length + extend_length + output_length)
+max_token_length=max(all_lengths)
+min_token_length=min(all_lengths)
 
 num_alphas=args.num_alphas
 num_betas=args.num_betas
@@ -94,16 +158,19 @@ if args.alpha is not None:
     alpha = torch.tensor([args.alpha])
     print(f'user provided single alpha: {alpha}')
 
-print(f"alpha: {alpha}")
-print(f"beta: {beta}")
-
 block_sparse_generator.prepare_config(alpha=alpha, beta=beta, max_profile_length=max_profile_length, max_token_length=max_token_length, min_token_length=min_token_length)
-for k,v in block_sparse_generator.config.items():
-    print(k)
-    print(v)
+# print alpha, beta pairs
+df = pd.DataFrame(
+    [
+        [a, b] + [a + b * n for n in all_lengths]
+        for a, b in zip(block_sparse_generator.config['alpha'], block_sparse_generator.config['beta'])
+    ],
+    columns=["alpha", "beta"] + [f"length_{n}" for n in all_lengths]
+)
+print("elastic rule search space and examples\n", df)
 
 num_elastic_length = len(elastic_length)
-    
+
 elastic_importance_loss = []
 elastic_latency_cost = []
 
@@ -201,10 +268,7 @@ def elastic_optimize(elastic_importance_loss, elastic_latency_cost, latency_boun
         optimize_config_ids: torch.tensor, shape: [num_plan, keep_dim]
     """
 
-    solver_kwargs = {
-        # can set time limit to make the process faster
-        # "time_limit": 300 * 60,
-    }
+    solver_kwargs = dict()
 
     if args.time_limit is not None:
         solver_kwargs['time_limit'] = args.time_limit * 60
