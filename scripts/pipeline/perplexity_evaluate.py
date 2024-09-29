@@ -25,7 +25,7 @@ def evaluate(model, tokenizer, args, user_prefix=None, assistant_prefix=None):
     if args.load_from_disk:
         data = load_from_disk(args.dataset_dir)
     else:
-        data = load_dataset(args.dataset_dir, split=args.split)
+        data = load_dataset(args.dataset_dir, "default", split=args.split)
         prompt_subset = load_dataset(args.dataset_dir, "prompt", split='train')
 
     data = data.filter(lambda x: x['dataset'] != 'hotpot_qa')

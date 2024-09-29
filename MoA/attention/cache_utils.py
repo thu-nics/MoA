@@ -14,7 +14,7 @@ class NewDynamicCache(Cache):
         band_size: List[List[int]],
         pattern_index: List[List[int]],
     ) -> None:
-        self.seen_tokens = 0
+        self.cache_position = 0
         self.layer_cache = []
         for i in range(len(pattern_num)):
             self.layer_cache.append(
@@ -35,7 +35,7 @@ class NewDynamicCache(Cache):
     ) -> Tuple[Tensor, Tensor]:
         # Update the number of seen tokens
         if layer_idx == 0:
-            self.seen_tokens += key_states.shape[-2]
+            self.cache_position += key_states.shape[-2]
 
         # Update the cache
         key_cache, value_cache = self.layer_cache[layer_idx].update(
@@ -76,7 +76,7 @@ class StreamingllmDynamicCache(Cache):
     def __init__(self) -> None:
         self.key_cache: List[Tensor] = []
         self.value_cache: List[Tensor] = []
-        self.seen_tokens = (
+        self.cache_position = (
             0  # Used in `generate` to keep tally of how many tokens the cache has seen
         )
 
@@ -113,7 +113,7 @@ class StreamingllmDynamicCache(Cache):
         value_states: Tensor,
         layer_idx: int,
         cache_kwargs: Optional[Dict[str, Any]] = None,
-        update_seen_tokens: Optional[int] = None,
+        update_cache_position: Optional[int] = None,
         global_size: Optional[int] = None,
         band_size: Optional[int] = None,
     ) -> Tuple[Tensor, Tensor]:
@@ -135,10 +135,10 @@ class StreamingllmDynamicCache(Cache):
         """
         # Update the number of seen tokens
         if layer_idx == 0:
-            if update_seen_tokens is not None:
-                self.seen_tokens += update_seen_tokens
+            if update_cache_position is not None:
+                self.cache_position += update_cache_position
             else:
-                self.seen_tokens += key_states.shape[-2]
+                self.cache_position += key_states.shape[-2]
 
         # Update the cache
         if len(self.key_cache) <= layer_idx:
@@ -295,7 +295,7 @@ class CircularCacheSingle(Cache):
     ) -> None:
         self.key_cache: List[Tensor] = []
         self.value_cache: List[Tensor] = []
-        self.seen_tokens = (
+        self.cache_position = (
             0  # Used in `generate` to keep tally of how many tokens the cache has seen\
         )
         self.global_size = []
@@ -420,7 +420,7 @@ class CircularCacheSingle(Cache):
 
         # Update the number of seen tokens
         if layer_idx == 0 and key_states is not None:
-            self.seen_tokens += key_states.shape[-2]
+            self.cache_position += key_states.shape[-2]
 
         # Update the cache
         if len(self.key_cache) <= layer_idx:
@@ -569,7 +569,8 @@ class CircularCache(Cache):
 
         self.num_layers = num_layers
 
-        self.seen_tokens = 0
+        # self.seen_tokens = 0
+        self.cache_position = 0
         self.current_tokens = 0
 
     def __len__(self):
@@ -588,9 +589,9 @@ class CircularCache(Cache):
         assert layer_idx < self.num_layers
 
         if layer_idx == 0:
-            self.seen_tokens += key_states[0].shape[-2]
+            self.cache_position += key_states[0].shape[-2]
         if layer_idx == self.num_layers - 1:
-            self.current_tokens = self.seen_tokens
+            self.current_tokens = self.cache_position
 
         if global_size is None:
             global_size = [None for _ in range(len(key_states))]
@@ -676,6 +677,7 @@ class StaticCircularCache(Cache):
             update_cache_content (*optional*, `bool`):
                 Whether to update the cache content when calling `.update`. If not provided, it will be set to `True`. Set to False if the kernel update the content
         """
+        super().__init__()
         self.dtype = dtype if dtype is not None else torch.float16
         self.device = device
         self.update_cache_content = update_cache_content
@@ -772,7 +774,7 @@ class StaticCircularCache(Cache):
             assert len(static_size[layer_id]) == len(cache_size[layer_id])
 
         # initialize the cache
-        self.seen_tokens = (
+        self.cache_position = (
             0  # Used in `generate` to keep tally of how many tokens the cache has seen
         )
         self._kv_len = [
@@ -1002,7 +1004,7 @@ class StaticCircularCache(Cache):
 
         # Update the number of seen tokens
         if layer_idx == 0:
-            self.seen_tokens += seq_len
+            self.cache_position += seq_len
 
         is_decode = seq_len == 1
 
