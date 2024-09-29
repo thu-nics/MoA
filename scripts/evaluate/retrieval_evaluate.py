@@ -52,7 +52,7 @@ def process_prompt(input, model, tokenizer, test_case: Dict, output_file: Option
         input.input_ids.to(device), 
         max_new_tokens=100, 
         use_cache=use_cache,
-        eos_token_id=stop_token_ids,
+        eos_token_id=stop_token_ids if stop_token_ids else tokenizer.eos_token_id,
     )[0]
     output = output[prompt_length:]
     output = tokenizer.batch_decode([output], skip_special_tokens=True)[0]
