@@ -47,7 +47,7 @@ if __name__ == "__main__":
     torch.cuda.empty_cache()
 
 
-    with torch.no_grad():
+    with torch.inference_mode():
         while True:
             if args.interactive:
                 prompt = input("Enter your message (or 'q' to quit): ")

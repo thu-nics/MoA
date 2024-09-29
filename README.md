@@ -39,9 +39,14 @@ pip install -r requirements.txt
 pip install -e .
 ```
 
+## Kind Note on Cloning the Repository
+
+If you have trouble cloning the repo, it is probably because the repo's git-lfs is too large. You can safely skip the downloading of git-lfs with `git clone --no-checkout <repo_url>`.
+
 ## Quick Start: Use Pre-defined Plans
 
 If you prefer not to perform the automatic compression plan search steps and want immediate results, we provide pre-compressed configurations for the `lmsys/vicuna-{size}-v1.5-16k` models (7B and 13B versions). These can be found in the `.json` files under the `examples` directory.
+
 You can directly go to `Evaluation` section to evaluate the model with the plans. 
 If you want to compress other models, you can follow the `Automatic Search Pipeline` section to compress the model by yourself.
 
@@ -90,6 +95,12 @@ CUDA_VISIBLE_DEVICES=0 python scripts/pipeline/perplexity_evaluate.py --model_na
 ```
 
 Alternatively, to evaluate all plans within a directory, run the following script:
+
+```
+scripts/pipeline/validate.sh <moa_config_dir> <moa_config_num> <result_dir> <model_name>
+```
+
+For example
 
 ```
 scripts/pipeline/validate.sh 7b/lut_result <plan_num> 7b/validate_result /lmsys/vicuna-7b-v1.5-16k
@@ -170,7 +181,7 @@ CUDA_VISIBLE_DEVICES=0 python scripts/evaluate/chat_demo.py --model_name lmsys/v
 
 ## TODOs
 
-> Due to padding issues in the prefill stage during batch inference, we temporarily switch to dense prefill in this repo for now. You can use sparse prefill without padding by modifying line 302 of `kernels/block_sparse_attention_lut.py`.
+> Due to padding issues in the Triton prefill stage during batch inference, we temporarily switch to dense prefill in this repo for now. You can use sparse prefill without padding by modifying line 302 of `kernels/block_sparse_attention_lut.py`.
 
 - [ ] Support padding in batch inference
 

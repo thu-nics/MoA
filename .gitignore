@@ -2,6 +2,7 @@
 *__pycache__*
 
 7b*/
+output/
 
 # ignore model files
 *.bin
