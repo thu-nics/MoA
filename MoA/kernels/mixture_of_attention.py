@@ -414,8 +414,8 @@ def mixture_of_sparse_attention(
                 key,
                 value,
                 causal=True,
-                num_global_blocks=sink_size,
-                num_band_blocks=local_size,
+                num_global_blocks=sink_size // BLOCK_N,
+                num_band_blocks=local_size // BLOCK_N,
                 kv_layout="HND",
             )
 
