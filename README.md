@@ -103,7 +103,7 @@ scripts/pipeline/validate.sh <moa_config_dir> <moa_config_num> <result_dir> <mod
 For example
 
 ```
-scripts/pipeline/validate.sh 7b/lut_result <plan_num> 7b/validate_result /lmsys/vicuna-7b-v1.5-16k
+scripts/pipeline/validate.sh 7b/lut_result <plan_num> 7b/validate_result lmsys/vicuna-7b-v1.5-16k
 ```
 
 Replace <plan_num> with the number of plans under the directory.

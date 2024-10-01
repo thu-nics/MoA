@@ -7,9 +7,6 @@ import torch.nn as nn
 from transformers import AutoTokenizer, AutoConfig, AutoModelForCausalLM
 from typing import Tuple
 
-from MoA.attention.set import (
-    set_static_attention_lut,
-)
 from MoA.models.llama.modeling_llama import LlamaModel_use_streamingllm_attention
 from MoA.models.llama.h2o import convert_kvcache_llama_heavy_recent
 
@@ -23,40 +20,6 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 # os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 # os.environ["TORCH_USE_CUDA_DSA"] = "1"
 
-def compress_model_attention(
-    model,
-    block_size: int = 64,
-    use_lut: bool = False,
-    lut_path: str = None,
-    lut_for_head_path: str = None,
-    args=None,
-    **kwargs,
-) -> Tuple[AutoTokenizer, nn.Module]:
-
-    if use_lut:
-        # use sparse decode and permute head
-        sparse_decode = True
-        permute_head = True
-        if args.not_permute_head:
-            permute_head = False
-        model.model.use_block_sparse_attention_lut(permute_head, sparse_decode)
-        print("Using lut from {}, block size {}".format(lut_path, block_size))
-        print("permute head is set to be {}".format(permute_head))
-        set_static_attention_lut(
-            lut_path, lut_for_head_path, model.model.layers, block_size, permute_head, sparse_decode
-        )
-
-    if args.streamingllm:
-        LlamaModel_use_streamingllm_attention(model.model, args.global_size, args.band_size)
-        print(f"using streamingllm, global size: {args.global_size}, band size: {args.band_size}")
-
-    if args.h2o:
-        model = convert_kvcache_llama_heavy_recent(model, args.heavy, args.recent)
-        print(f"using h2o, heavy: {args.heavy}, recent: {args.recent}")
-
-    return model
-
-
 def parse_args():
     parser = argparse.ArgumentParser(description="LLM Evaluation")
     parser.add_argument(
@@ -66,23 +29,6 @@ def parse_args():
         "--tokenizer_name", type=str, default=None
     )
     parser.add_argument("--output_file", default=None, type=str, help="Output filename")
-
-    parser.add_argument(
-        "--use_lut", action="store_true", default=False, help="Whether to use lut"
-    )
-    parser.add_argument(
-        "--lut_path",
-        nargs="+",
-        type=str,
-        help="List of paths to load efficient attention lut",
-    )
-    parser.add_argument('--not_permute_head', action='store_true')
-    parser.add_argument(
-        "--lut_for_head_path",
-        default=None,
-        type=str,
-        help="Path to load efficient attention lut for head",
-    )
     parser.add_argument(
         "--block_size", default=64, type=int, help="Block size of the attention map"
     )
@@ -95,7 +41,12 @@ def parse_args():
     parser.add_argument(
         "--global_size", default=64, type=int, help="Global size of the attention map"
     )
-
+    parser.add_argument(
+        "--moa_config",
+        type=str,
+        default=None,
+        help="the path to moa configuration file",
+    )
     parser.add_argument(
         '--h2o', action='store_true', help='Whether to use h2o'
     )
@@ -251,25 +202,40 @@ if __name__ == "__main__":
     print(f"using {config._attn_implementation_internal} attention implementation")
 
     # load model
+    if args.moa_config is not None:
+        attn_implementation = "sdpa"
+    elif args.use_flash_attention:
+        attn_implementation = "flash_attention_2"
+    elif args.streamingllm:
+        attn_implementation = "eager"
+    elif args.h2o:
+        attn_implementation = "eager"
+    else:
+        attn_implementation = "sdpa"
+        
     model = AutoModelForCausalLM.from_pretrained(
         args.model_name,
         config=config,
         device_map="auto",
         torch_dtype=torch.float16,
-        attn_implementation=(
-            "eager" if not args.use_flash_attention else "flash_attention_2"
-        ),
+        attn_implementation=attn_implementation,
     ).eval()
 
-    # compress model
-    model = update_model_function(model, args.model_name)
-    model = compress_model_attention(
-        model=model,
-        block_size=args.block_size,
-        use_lut=args.use_lut,
-        lut_path=args.lut_path,
-        args=args,
-    )
+    if args.streamingllm:
+        LlamaModel_use_streamingllm_attention(model.model, args.global_size, args.band_size)
+        print(f"using streamingllm, global size: {args.global_size}, band size: {args.band_size}")
+
+    if args.h2o:
+        model = convert_kvcache_llama_heavy_recent(model, args.heavy, args.recent)
+        print(f"using h2o, heavy: {args.heavy}, recent: {args.recent}")
+
+    if args.moa_config is not None:
+        moa_config_path = args.moa_config
+        with open(moa_config_path, 'r') as f:
+            moa_config = json.load(f)
+        # Add mixture of sparse attention capability to the model
+        model = update_model_function(model, args.model_name)
+        model.model.set_mixture_of_attention(moa_config, permute_head=True)
 
     if model.generation_config.pad_token_id is None:
         model.generation_config.pad_token_id = tokenizer.pad_token_id
