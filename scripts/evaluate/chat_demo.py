@@ -62,19 +62,19 @@ if __name__ == "__main__":
             conv.append_message(conv.roles[1], None)
             prompt = conv.get_prompt()
 
-            input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(model.device)
+            input_ids = tokenizer(prompt, return_tensors="pt").to(model.device)
 
             """Start Recoding Time and Memory Usage"""
             start_event.record()
             torch.cuda.reset_peak_memory_stats()
 
             outputs = model.generate(
-                input_ids,
+                **input_ids,
                 max_new_tokens=1024*1,
                 do_sample=True,
                 # temperature=0.6,
                 # top_p=0.9,
-                num_return_sequences=num_return_sequences,
+                num_return_sequences=num_return_sequences
             )
 
             end_event.record()
@@ -83,7 +83,7 @@ if __name__ == "__main__":
             max_memory = torch.cuda.max_memory_allocated() / 2**30
             """End Recoding Time and Memory Usage"""
 
-            response = outputs[..., input_ids.shape[-1]:]
+            response = outputs[..., input_ids.input_ids.shape[-1]:]
             response_texts = tokenizer.batch_decode(response, skip_special_tokens=True)
 
             for i, response_text in enumerate(response_texts):
