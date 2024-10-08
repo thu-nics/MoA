@@ -112,11 +112,6 @@ def generate_lines_dataset(cfgs: dict) -> Dataset:
     return dataset
 
 if __name__ == "__main__":
-    # line_range = range(16, 705, 16)
-    # line_range = range(16, 35, 16)
-    # line_range = range(2040, 2150, 32)
-    # line_range = range(24, 48, 16)
-
     parser = argparse.ArgumentParser(description="Generate dataset for long evaluation")
     parser.add_argument(
         "--length_level",
@@ -152,7 +147,7 @@ if __name__ == "__main__":
 
     cfgs = {
         "task": "lines",
-        "num_test_samples": 40,
+        "num_test_samples": 100,
         "num_lines": [],
         "line_idx_opt": "LRT-NL"
     }
@@ -192,20 +187,30 @@ if __name__ == "__main__":
 
     cfgs["num_lines"] = [i for i in range(start - 64, start + 96, 32)]
 
+    # Generate the initial dataset
     retrieve_dataset: Dataset = generate_lines_dataset(cfgs)
 
-    retrieve_dataset = retrieve_dataset.map(lambda data: to_question(data)) # columns: key_id, key_str, value, content, correct_line, num_lines, question
-    retrieve_dataset = retrieve_dataset.map(lambda data: get_tokenized_len(data, tokenizer)) # columns: key_id, key_str, value, content, correct_line, num_lines, question, tokenized_len
-    num = 0
-    for data in retrieve_dataset:
-        sample_length = (data['tokenized_len'])
+    # Apply transformations to the dataset
+    retrieve_dataset = retrieve_dataset.map(lambda data: to_question(data))  # Adds: key_id, key_str, value, content, correct_line, num_lines, question
+    retrieve_dataset = retrieve_dataset.map(lambda data: get_tokenized_len(data, tokenizer))  # Adds: tokenized_len
+
+    # Define the filtering condition
+    def filter_condition(data):
+        sample_length = data['tokenized_len']
         sample_length_level = (sample_length - 1) // 1024 + 1
-        if sample_length_level == length_level:
-            num += 1
+        return sample_length_level == length_level
 
-    assert num > 100, f"num of samples: {num}"
-    print("save to disk of path: ", output_path)
+    # Apply the filter to retain only desired samples
+    filtered_dataset = retrieve_dataset.filter(filter_condition)
 
-    # save data
+    # Count the number of filtered samples
+    num = len(filtered_dataset)  # If using Hugging Face Datasets, .num_rows can also be used
+    print("Number of filtered samples:", num)
+
+    # Ensure there are enough samples
+    assert num > 100, f"Number of samples ({num}) is not greater than 100."
+
+    # Save the filtered dataset to disk
+    print("Saving filtered dataset to path:", output_path)
     retrieve_dataset.save_to_disk(output_path)
     key_id_df = retrieve_dataset.to_pandas()[["key_id", "num_lines"]].to_csv(os.path.join(output_path, "key_id.csv"), index=False)

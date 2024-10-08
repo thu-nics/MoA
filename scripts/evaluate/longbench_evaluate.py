@@ -10,8 +10,10 @@ from typing import Tuple
 from MoA.models.llama.modeling_llama import LlamaModel_use_streamingllm_attention
 from MoA.models.llama.h2o import convert_kvcache_llama_heavy_recent
 
-from MoA.evaluation.LongBench.eval import scorer, scorer_e
 from MoA.models.interface import update_model_function
+
+from MoA.evaluation.LongBench.pred import seed_everything, get_pred
+from MoA.evaluation.LongBench.eval import scorer, scorer_e
 
 # set cuda visible device
 # triton implementation ONLY support single GPU inference
@@ -109,7 +111,6 @@ def parse_args():
         ],
         help="Which evaluation method to use.",
     )
-
     parser.add_argument(
         "--shuffle_dataset",
         action="store_true",
@@ -167,6 +168,9 @@ def parse_args():
     parser.add_argument(
         "--longbench_length_range", type=str, choices=["all", "0-4k", "4-8k", "8k+"], default="all",
     )
+    parser.add_argument(
+        "--score_only", action="store_true", help="Only calculate the score based on the already-existing output",
+    )
 
     args = parser.parse_args()
     return args
@@ -192,149 +196,143 @@ if __name__ == "__main__":
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token_id = tokenizer.eos_token_id
 
-    # define model config
-    config = AutoConfig.from_pretrained(args.model_name)
-    if args.use_flash_attention:
-        config._attn_implementation = "flash_attention_2"
+    """load model"""
+    if not args.score_only:
+        if args.moa_config is not None:
+            attn_implementation = "sdpa"
+        elif args.use_flash_attention:
+            attn_implementation = "flash_attention_2"
+        elif args.streamingllm:
+            attn_implementation = "eager"
+        elif args.h2o:
+            attn_implementation = "eager"
+        else:
+            attn_implementation = "sdpa"
+
+        # define model config
+        config = AutoConfig.from_pretrained(args.model_name)
+        config._attn_implementation_internal = attn_implementation
+
+        print(f"using {config._attn_implementation_internal} attention implementation")
+
+            
+        model = AutoModelForCausalLM.from_pretrained(
+            args.model_name,
+            config=config,
+            device_map="auto",
+            torch_dtype=torch.float16,
+            attn_implementation=attn_implementation,
+        ).eval()
+
+        if args.streamingllm:
+            LlamaModel_use_streamingllm_attention(model.model, args.global_size, args.band_size)
+            print(f"using streamingllm, global size: {args.global_size}, band size: {args.band_size}")
+
+        if args.h2o:
+            model = convert_kvcache_llama_heavy_recent(model, args.heavy, args.recent)
+            print(f"using h2o, heavy: {args.heavy}, recent: {args.recent}")
+
+        if args.moa_config is not None:
+            moa_config_path = args.moa_config
+            with open(moa_config_path, 'r') as f:
+                moa_config = json.load(f)
+            # Add mixture of sparse attention capability to the model
+            model = update_model_function(model, args.model_name)
+            model.model.set_mixture_of_attention(moa_config, permute_head=True)
+
+    
+
+    ### copy from LongBench ###
+    seed_everything(42)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    model_name = args.model_name
+    max_length = args.max_length
+
+    print("max_length", max_length)
+
+    if args.longbench_e:
+        datasets = [
+            "qasper",
+            "multifieldqa_en",
+            "hotpotqa",
+            "2wikimqa",
+            "gov_report",
+            "multi_news",
+            "trec",
+            "triviaqa",
+            "samsum",
+            "passage_count",
+            "passage_retrieval_en",
+            "lcc",
+            "repobench-p",
+        ]
+
+        if args.evaluation_dataset is not None:
+            datasets = args.evaluation_dataset
     else:
-        config._attn_implementation_internal = "eager"
-
-    print(f"using {config._attn_implementation_internal} attention implementation")
-
-    # load model
-    if args.moa_config is not None:
-        attn_implementation = "sdpa"
-    elif args.use_flash_attention:
-        attn_implementation = "flash_attention_2"
-    elif args.streamingllm:
-        attn_implementation = "eager"
-    elif args.h2o:
-        attn_implementation = "eager"
-    else:
-        attn_implementation = "sdpa"
-        
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model_name,
-        config=config,
-        device_map="auto",
-        torch_dtype=torch.float16,
-        attn_implementation=attn_implementation,
-    ).eval()
-
-    if args.streamingllm:
-        LlamaModel_use_streamingllm_attention(model.model, args.global_size, args.band_size)
-        print(f"using streamingllm, global size: {args.global_size}, band size: {args.band_size}")
-
-    if args.h2o:
-        model = convert_kvcache_llama_heavy_recent(model, args.heavy, args.recent)
-        print(f"using h2o, heavy: {args.heavy}, recent: {args.recent}")
-
-    if args.moa_config is not None:
-        moa_config_path = args.moa_config
-        with open(moa_config_path, 'r') as f:
-            moa_config = json.load(f)
-        # Add mixture of sparse attention capability to the model
-        model = update_model_function(model, args.model_name)
-        model.model.set_mixture_of_attention(moa_config, permute_head=True)
-
-    if model.generation_config.pad_token_id is None:
-        model.generation_config.pad_token_id = tokenizer.pad_token_id
-
-
-    # evaluate with LongBench
-    if args.eval == "longbench" or args.eval == "longbench_fast":
-        from MoA.evaluation.LongBench.pred import seed_everything, get_pred
-
-        ### copy from LongBench ###
-        seed_everything(42)
-
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-        model_name = args.model_name
-        max_length = args.max_length
-
-        print("max_length", max_length)
-
-        if args.longbench_e:
+        if args.eval == "longbench_fast":
             datasets = [
+                "multifieldqa_en",
+                "2wikimqa",
+                "lcc",
+                "samsum",
+                "multi_news",
+            ]
+
+            if args.evaluation_dataset is not None:
+                datasets = args.evaluation_dataset
+        else:
+            datasets = [
+                "narrativeqa",
                 "qasper",
                 "multifieldqa_en",
+                "multifieldqa_zh",
                 "hotpotqa",
                 "2wikimqa",
+                "musique",
+                "dureader",
                 "gov_report",
+                "qmsum",
                 "multi_news",
+                "vcsum",
                 "trec",
                 "triviaqa",
                 "samsum",
+                "lsht",
                 "passage_count",
                 "passage_retrieval_en",
+                "passage_retrieval_zh",
                 "lcc",
                 "repobench-p",
             ]
 
             if args.evaluation_dataset is not None:
                 datasets = args.evaluation_dataset
-        else:
-            if args.eval == "longbench_fast":
-                datasets = [
-                    "multifieldqa_en",
-                    "2wikimqa",
-                    "lcc",
-                    "samsum",
-                    "multi_news",
-                ]
+    
+    print(f"evaluating on {datasets}")
+    
+    # we design specific prompt format and max generation length for each task, feel free to modify them to optimize model output
+    dataset2prompt = json.load(
+        open("data/LongBench/config/dataset2prompt.json", "r")
+    )
+    dataset2maxlen = json.load(
+        open("data/LongBench/config/dataset2maxlen.json", "r")
+    )
+    # predict on each dataset
+    result_dir = args.longbench_result_dir
+    pred_dir = os.path.join(result_dir, "longbench/pred", args.longbench_length_range)
+    pred_e_dir = os.path.join(result_dir, "longbench/pred_e", args.longbench_length_range)
 
-                if args.evaluation_dataset is not None:
-                    datasets = args.evaluation_dataset
-            else:
-                datasets = [
-                    "narrativeqa",
-                    "qasper",
-                    "multifieldqa_en",
-                    "multifieldqa_zh",
-                    "hotpotqa",
-                    "2wikimqa",
-                    "musique",
-                    "dureader",
-                    "gov_report",
-                    "qmsum",
-                    "multi_news",
-                    "vcsum",
-                    "trec",
-                    "triviaqa",
-                    "samsum",
-                    "lsht",
-                    "passage_count",
-                    "passage_retrieval_en",
-                    "passage_retrieval_zh",
-                    "lcc",
-                    "repobench-p",
-                ]
+    os.makedirs(result_dir, exist_ok=True)
+    os.makedirs(pred_dir, exist_ok=True)
+    os.makedirs(pred_e_dir, exist_ok=True)
 
-                if args.evaluation_dataset is not None:
-                    datasets = args.evaluation_dataset
-        
-        print(f"evaluating on {datasets}")
-        
-        # we design specific prompt format and max generation length for each task, feel free to modify them to optimize model output
-        dataset2prompt = json.load(
-            open("data/LongBench/config/dataset2prompt.json", "r")
-        )
-        dataset2maxlen = json.load(
-            open("data/LongBench/config/dataset2maxlen.json", "r")
-        )
-        # predict on each dataset
-        result_dir = args.longbench_result_dir
-        pred_dir = os.path.join(result_dir, "longbench/pred", args.longbench_length_range)
-        pred_e_dir = os.path.join(result_dir, "longbench/pred_e", args.longbench_length_range)
+    base_model_name = model_name.rstrip("/").split("/")[-1]
+    print(f"base_model_name: {base_model_name}")
 
-        os.makedirs(result_dir, exist_ok=True)
-        os.makedirs(pred_dir, exist_ok=True)
-        os.makedirs(pred_e_dir, exist_ok=True)
-
-        base_model_name = model_name.rstrip("/").split("/")[-1]
-        print(f"base_model_name: {base_model_name}")
-
+    if not args.score_only:
         for dataset in datasets:
             if args.longbench_e:
                 data = load_dataset("THUDM/LongBench", f"{dataset}_e", split="test")
@@ -365,35 +363,35 @@ if __name__ == "__main__":
                     json.dump(pred, f, ensure_ascii=False)
                     f.write("\n")
 
-        # evaluate the result
-        scores = dict()
+    # evaluate the result
+    scores = dict()
+    if args.longbench_e:
+        path = os.path.join(pred_e_dir, base_model_name)
+    else:
+        path = os.path.join(pred_dir, base_model_name)
+    all_files = os.listdir(path)
+    print("Evaluating on:", all_files)
+    for filename in all_files:
+        if not filename.endswith("jsonl"):
+            continue
+        predictions, answers, lengths = [], [], []
+        dataset = filename.split(".")[0]
+        with open(os.path.join(path, filename), "r", encoding="utf-8") as f:
+            for line in f:
+                data = json.loads(line)
+                predictions.append(data["pred"])
+                answers.append(data["answers"])
+                all_classes = data["all_classes"]
+                if "length" in data:
+                    lengths.append(data["length"])
         if args.longbench_e:
-            path = os.path.join(pred_e_dir, base_model_name)
+            score = scorer_e(dataset, predictions, answers, lengths, all_classes, args.longbench_length_range)
         else:
-            path = os.path.join(pred_dir, base_model_name)
-        all_files = os.listdir(path)
-        print("Evaluating on:", all_files)
-        for filename in all_files:
-            if not filename.endswith("jsonl"):
-                continue
-            predictions, answers, lengths = [], [], []
-            dataset = filename.split(".")[0]
-            with open(os.path.join(path, filename), "r", encoding="utf-8") as f:
-                for line in f:
-                    data = json.loads(line)
-                    predictions.append(data["pred"])
-                    answers.append(data["answers"])
-                    all_classes = data["all_classes"]
-                    if "length" in data:
-                        lengths.append(data["length"])
-            if args.longbench_e:
-                score = scorer_e(dataset, predictions, answers, lengths, all_classes, args.longbench_length_range)
-            else:
-                score = scorer(dataset, predictions, answers, all_classes)
-            scores[dataset] = score
-        if args.longbench_e:
-            out_path = os.path.join(pred_e_dir, base_model_name, "result.json")
-        else:
-            out_path = os.path.join(pred_dir, base_model_name, "result.json")
-        with open(out_path, "w") as f:
-            json.dump(scores, f, ensure_ascii=False, indent=4)
+            score = scorer(dataset, predictions, answers, all_classes)
+        scores[dataset] = score
+    if args.longbench_e:
+        out_path = os.path.join(pred_e_dir, base_model_name, "result.json")
+    else:
+        out_path = os.path.join(pred_dir, base_model_name, "result.json")
+    with open(out_path, "w") as f:
+        json.dump(scores, f, ensure_ascii=False, indent=4)

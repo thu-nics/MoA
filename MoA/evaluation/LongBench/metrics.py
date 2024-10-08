@@ -28,10 +28,11 @@ def normalize_answer(s):
     def remove_eos(text):
         return text.replace("</s>", " ")
 
-    return white_space_fix(remove_articles(remove_punc(lower(s))))
+    # original process code
+    # return white_space_fix(remove_articles(remove_punc(lower(s))))
     
-    # use this for llama-3
-    # return white_space_fix(remove_articles(remove_punc(lower(remove_eos(s)))))
+    # use this for models with <\s> ending, like llama-3
+    return white_space_fix(remove_articles(remove_punc(lower(remove_eos(s)))))
 
 
 
