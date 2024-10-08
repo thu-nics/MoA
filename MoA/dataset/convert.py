@@ -806,6 +806,7 @@ def multi_round_qa_to_multi_round_qa_model_by_batch(
     tokenizer: AutoTokenizer,
     prompt_format: str = None,
     max_length: int = None,
+    max_new_tokens: int = 128,
     batch_size: int = 4,
     idx: int = None
 ) -> dict:
@@ -857,7 +858,7 @@ def multi_round_qa_to_multi_round_qa_model_by_batch(
         model_inputs.append(model_input)
     
     # batch inference
-    with torch.no_grad():
+    with torch.inference_mode():
         for i in range(0, len(model_inputs), batch_size):
             model_input = model_inputs[i: i+batch_size]
             model_input = tokenizer(model_input, return_tensors="pt", padding=True).to(model.device)
@@ -879,7 +880,7 @@ def multi_round_qa_to_multi_round_qa_model_by_batch(
                 # Generate the user input and model response
                 model_responses = model.generate(
                     **model_input,
-                    max_new_tokens=128,
+                    max_new_tokens=max_new_tokens,
                     eos_token_id=stop_token_ids,
                     # do_sample=True,
                     # temperature=0.6,
