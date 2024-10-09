@@ -1,7 +1,7 @@
 import torch
 from torch.nn import ModuleList
 from typing import List
-from MoA.models.llama.density_calculation import lut_kv_cache_density, lut_attention_density
+from MoA.attention.density_calculation import lut_kv_cache_density, lut_attention_density
 
 def set_static_attention_lut(attention_lut_path_list: List[str], attention_lut_for_head_path: str = None, model_layers: ModuleList = None, block_size: int = 64, permute_head=False, sparse_decode=False):
     """

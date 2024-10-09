@@ -3,8 +3,9 @@ from tqdm import tqdm
 import numpy as np
 import pandas as pd
 import os
-import cvxpy as cp
+import json
 import argparse
+from collections import defaultdict
 
 from MoA.universal.elastic_block_sparse import ElasticBlockSparse
 
@@ -14,34 +15,96 @@ from MoA.attention.convert import layout_to_lut_single_density
 from MoA.attention.pattern import gen_causal_pattern
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--output_dir', type=str, required=True, help='output directory')
-parser.add_argument('--elastic_length', type=int, nargs='+', default=[1024, 2048, 3072, 4096], help='elastic length')
-parser.add_argument('--extend_length', type=int, nargs='+', default=[8192, 16384], help='extend length')
-parser.add_argument('--density_bounds', type=float, nargs='+', default=[1.00, 0.77, 0.58, 0.46, 0.25, 0.13], help='density bounds')
-parser.add_argument('--importance_tensor_dir', type=str, required=True, help='importance tensor directory')
-parser.add_argument('--output_length', type=int, nargs='+', default=[2048, 4096, 8192, 16384], help='output length')
-parser.add_argument('--num_plan_limit', type=int, default=2, help='number of plans to construct')
-parser.add_argument('--num_alphas', type=int, default=None, help='number of alphas')
-parser.add_argument('--alpha', type=float, default=None, help='for uniform extend')
-parser.add_argument('--alpha_interval', type=int, default=1024, help='interval of alpha')
-parser.add_argument('--num_betas', type=int, default=9, help='number of alphas')
-parser.add_argument('--beta', type=float, default=None, help="for uniform extend")
-parser.add_argument('--latency_lower_bound_ratio', type=float, default=0.9, help='the ratio of the lower bound for latency optimization') 
+parser.add_argument("--output_dir", type=str, required=True, help="output directory")
+parser.add_argument(
+    "--elastic_length",
+    type=int,
+    nargs="+",
+    default=[2048, 4096, 8192],
+    help="the profile lengths",
+)
+parser.add_argument(
+    "--extend_length",
+    type=int,
+    nargs="+",
+    default=[16384],
+    help="the length that should also be constraint by density",
+)
+parser.add_argument(
+    "--density_bounds",
+    type=float,
+    nargs="+",
+    default=[0.5, 0.5, 0.5, 0.5],
+    help="density bounds for elastic length and extend length",
+)
+parser.add_argument(
+    "--importance_tensor_dir",
+    type=str,
+    required=True,
+    help="the root directory for importance tensor",
+)
+parser.add_argument(
+    "--output_length",
+    type=int,
+    nargs="+",
+    default=[2048, 4096, 8192, 16384],
+    help="output length",
+)
+parser.add_argument(
+    "--num_plan_limit", type=int, default=2, help="number of plans to construct"
+)
+parser.add_argument("--num_alphas", type=int, default=None, help="number of alphas")
+parser.add_argument("--alpha", type=float, default=None, help="for uniform extend")
+parser.add_argument(
+    "--alpha_interval", type=int, default=1024, help="interval of alpha"
+)
+parser.add_argument("--num_betas", type=int, default=9, help="number of alphas")
+parser.add_argument("--beta", type=float, default=None, help="for uniform extend")
+parser.add_argument(
+    "--latency_lower_bound_ratio",
+    type=float,
+    default=0.9,
+    help="the ratio of the lower bound for latency optimization",
+)
 
-parser.add_argument('--device', type=str, default='cpu', help='device to run the code')
-parser.add_argument('--same_per_layer', action='store_true', help='whether to sum the importance tensor per layer')
+parser.add_argument("--device", type=str, default="cpu", help="device to run the code")
+parser.add_argument(
+    "--same_per_layer",
+    action="store_true",
+    help="whether to sum the importance tensor per layer",
+)
 
-parser.add_argument('--block_size', type=int, default=64)
-parser.add_argument('--aggregating_block_size', type=int, default=64, help='aggregating block size for importance tensor')
+parser.add_argument("--block_size", type=int, default=64)
+parser.add_argument(
+    "--aggregating_block_size",
+    type=int,
+    default=64,
+    help="aggregating block size for importance tensor",
+)
 
-parser.add_argument('--normalize_by_head', action='store_true', help='whether to make loss sum on every head the same')
-parser.add_argument('--normalize_by_layer', action='store_true', help='whether to make the loss sum on every layer the same')
+parser.add_argument(
+    "--normalize_by_head",
+    action="store_true",
+    help="whether to make loss sum on every head the same",
+)
+parser.add_argument(
+    "--normalize_by_layer",
+    action="store_true",
+    help="whether to make the loss sum on every layer the same",
+)
 
-parser.add_argument('--num_key_value_groups', type=int, default=1, help="for group query")
+parser.add_argument(
+    "--num_key_value_groups", type=int, default=1, help="for group query"
+)
 
-parser.add_argument('--save_layout', action='store_true', help='whether to save layout')
+parser.add_argument("--save_layout", action="store_true", help="whether to save layout")
 
-parser.add_argument('--time_limit', type=int, default=None)
+parser.add_argument(
+    "--time_limit",
+    type=int,
+    help="the time limit in seconds for optimizer to solve each single-objective optimization",
+    default=None,
+)
 
 args = parser.parse_args()
 
@@ -71,14 +134,16 @@ block_sparse_generator = ElasticBlockSparse(
     accuracy_loss_ratio=1.0
 )
 
-elastic_length = args.elastic_length
-extend_length = args.extend_length
+elastic_length: list = args.elastic_length
+extend_length: list = args.extend_length
 density_bounds = args.density_bounds
-output_length = args.output_length
+output_length: list = args.output_length
+
+all_lengths = elastic_length + extend_length + output_length
 
 max_profile_length=max(elastic_length)
-max_token_length=max(elastic_length + extend_length + output_length)
-min_token_length=min(elastic_length + extend_length + output_length)
+max_token_length=max(all_lengths)
+min_token_length=min(all_lengths)
 
 num_alphas=args.num_alphas
 num_betas=args.num_betas
@@ -93,16 +158,19 @@ if args.alpha is not None:
     alpha = torch.tensor([args.alpha])
     print(f'user provided single alpha: {alpha}')
 
-print(f"alpha: {alpha}")
-print(f"beta: {beta}")
-
 block_sparse_generator.prepare_config(alpha=alpha, beta=beta, max_profile_length=max_profile_length, max_token_length=max_token_length, min_token_length=min_token_length)
-for k,v in block_sparse_generator.config.items():
-    print(k)
-    print(v)
+# print alpha, beta pairs
+df = pd.DataFrame(
+    [
+        [a, b] + [a + b * n for n in all_lengths]
+        for a, b in zip(block_sparse_generator.config['alpha'], block_sparse_generator.config['beta'])
+    ],
+    columns=["alpha", "beta"] + [f"length_{n}" for n in all_lengths]
+)
+print("elastic rule search space and examples\n", df)
 
 num_elastic_length = len(elastic_length)
-    
+
 elastic_importance_loss = []
 elastic_latency_cost = []
 
@@ -200,10 +268,7 @@ def elastic_optimize(elastic_importance_loss, elastic_latency_cost, latency_boun
         optimize_config_ids: torch.tensor, shape: [num_plan, keep_dim]
     """
 
-    solver_kwargs = {
-        # can set time limit to make the process faster
-        # "time_limit": 300 * 60,
-    }
+    solver_kwargs = dict()
 
     if args.time_limit is not None:
         solver_kwargs['time_limit'] = args.time_limit * 60
@@ -275,34 +340,46 @@ def elastic_output_plan(block_sparse_generator, optimize_config_ids, output_leng
     pd.DataFrame(torch.sum(opt_importance_loss, dim=(-1)).numpy()).to_csv(os.path.join(output_dir, 'opt_importance_loss.csv'))
 
     for plan_id in range(num_plan):
-        # output the plan at all length
-        for token_length in output_length:
-            print(f"Token Length: {token_length}")
-            num_block = token_length // block_size
-            optimize_config_id = optimize_config_ids[plan_id].reshape(-1,1)
-            layout = block_sparse_generator.config_id_to_plan(optimize_config_id, shape=(token_length, token_length))
-            if same_per_layer:
-                layout = layout.reshape(profile_num_layer, 1, num_block, num_block).expand(-1, profile_num_head, -1, -1)
-            else:
-                layout = layout.reshape(profile_num_layer, profile_num_head, num_block, num_block)
-            # print density
-            causal_layout = gen_causal_pattern(num_block, num_block, dtype=torch.bool)
+        optimize_config_id = optimize_config_ids[plan_id].reshape(-1,1)
+        moa_config = block_sparse_generator.config_id_to_plan(optimize_config_id, shape=(profile_num_layer, profile_num_head if not same_per_layer else 1))
 
-            density: float = block_sparse_generator._calculate_density(layout)
-            print(f"Average Density {density}")
+        # save as file
+        moa_config_path = os.path.join(output_dir, f'moa_config_plan_{plan_id}.json')
+        print(f"Save moa config to {moa_config_path}")
+        with open(moa_config_path, 'w') as f:
+            json.dump(moa_config, f)
 
-            # save as file
-            # convert to lut and save
-            lut = layout_to_lut_single_density(layout)
-            if args.save_layout:
+        # show densities for lengths
+        density_dict = dict()
+        for length in elastic_length + extend_length + output_length:
+            density = block_sparse_generator._config_to_density(moa_config, length=length)
+            density_dict[length] = density
+        print("Density", {k: f"{v:.3f}" for k, v in density_dict.items()})
+
+        # convert to lut and save
+        if args.save_layout:
+            for token_length in output_length:
+                # output the plan at all length
+                print(f"Token Length: {token_length}")
+
+                num_block = token_length // block_size
+
+                layout = block_sparse_generator.plan_config_to_layout(optimize_config_id, shape=(token_length, token_length))
+
+                if same_per_layer:
+                    layout = layout.reshape(profile_num_layer, 1, num_block, num_block).expand(-1, profile_num_head, -1, -1)
+                else:
+                    layout = layout.reshape(profile_num_layer, profile_num_head, num_block, num_block)
+                # print density
+                causal_layout = gen_causal_pattern(num_block, num_block, dtype=torch.bool)
+                
                 layout_path = os.path.join(output_dir, f'layout_{token_length}_plan_{plan_id}.pt')
                 print(f"Save layout to {layout_path}")
                 torch.save(layout, layout_path)
-            if args.num_key_value_groups > 1:
-                lut = [layer_lut.repeat_interleave(args.num_key_value_groups, dim=0) for layer_lut in lut]
-            lut_path = os.path.join(output_dir, f'lut_{token_length}_plan_{plan_id}.pt')
-            print(f"Save lut to {lut_path}")
-            torch.save(lut, lut_path)
+
+                density: float = block_sparse_generator._layout_to_density(layout)
+                print(f"Average Density {density}")
+
     print("done")
 
 output_length = args.output_length

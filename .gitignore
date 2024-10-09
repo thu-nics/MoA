@@ -2,10 +2,12 @@
 *__pycache__*
 
 7b*/
+output/
 
 # ignore model files
 *.bin
 *.pt
+*.csv
 
 # ignore installation files
 *.egg-info

@@ -14,6 +14,8 @@ from datasets import Dataset, concatenate_datasets
 from tqdm import tqdm
 from transformers import AutoTokenizer
 import argparse
+from MoA.dataset.long_eval.convert import to_question, get_tokenized_len
+import numpy as np
 
 def retrieve_expected(lines, random_line_pos):
     correct_line = lines[random_line_pos]
@@ -110,38 +112,61 @@ def generate_lines_dataset(cfgs: dict) -> Dataset:
     return dataset
 
 if __name__ == "__main__":
-    # line_range = range(16, 705, 16)
-    # line_range = range(16, 35, 16)
-    line_range = range(2040, 2150, 32)
-    # line_range = range(24, 48, 16)
+    parser = argparse.ArgumentParser(description="Generate dataset for long evaluation")
+    parser.add_argument(
+        "--length_level",
+        type=int,
+        help="the length of dataset in unit K.",
+        default=16,
+    )
 
-    parser = argparse.ArgumentParser(description='Generate dataset for long evaluation')
-    parser.add_argument("--length_level", type=int, default=12)
+    parser.add_argument(
+        "--output_path",
+        type=str,
+        help="the path to save the generated dataset",
+        default="local/universal/dataset/longeval_lines_multiple",
+    )
+
+    parser.add_argument(
+        "--model_name",
+        type=str,
+        help="the model name for the tokenizer",
+        default="gradientai/Llama-3-8B-Instruct-262k",
+    )
+
+    parser.add_argument(
+        "--init_num_lines",
+        type=int,
+        help="the initial number of lines",
+        default=None,
+    )
+
     args = parser.parse_args()
 
-    tokenizer = AutoTokenizer.from_pretrained("gradientai/Llama-3-8B-Instruct-262k", trust_remote_code=True, use_fast=True)
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name, trust_remote_code=True, use_fast=True)
 
     cfgs = {
         "task": "lines",
-        "num_test_samples": 40,
-        "num_lines": [i for i in line_range],
+        "num_test_samples": 100,
+        "num_lines": [],
         "line_idx_opt": "LRT-NL"
     }
 
     test_cfgs = {
         "task": "lines",
         "num_test_samples": 20,
-        "num_lines": [i for i in line_range],
+        "num_lines": [],
         "line_idx_opt": "LRT-NL"
     }
 
     length_level = args.length_level
-    start = length_level * 1024 // 13
+    if not args.init_num_lines:
+        start = length_level * 1024 // 13
+    else:
+        start = args.init_num_lines
 
-    output_path = f"./autofit/universal/llama-3-longeval-{length_level}k-1"
+    output_path = os.path.join(args.output_path, f"longeval-{length_level}k")
 
-    from MoA.dataset.long_eval.convert import to_question, get_tokenized_len
-    import numpy as np
     # find the best start
     while True:
         test_line_range = range(start, start + 64, 32)
@@ -161,22 +186,31 @@ if __name__ == "__main__":
         print(f"adjusting start to {start}...")
 
     cfgs["num_lines"] = [i for i in range(start - 64, start + 96, 32)]
-        
+
+    # Generate the initial dataset
     retrieve_dataset: Dataset = generate_lines_dataset(cfgs)
 
-    retrieve_dataset = retrieve_dataset.map(lambda data: to_question(data)) # columns: key_id, key_str, value, content, correct_line, num_lines, question
-    retrieve_dataset = retrieve_dataset.map(lambda data: get_tokenized_len(data, tokenizer)) # columns: key_id, key_str, value, content, correct_line, num_lines, question, tokenized_len
-    num = 0
-    for data in retrieve_dataset:
-        sample_length = (data['tokenized_len'])
+    # Apply transformations to the dataset
+    retrieve_dataset = retrieve_dataset.map(lambda data: to_question(data))  # Adds: key_id, key_str, value, content, correct_line, num_lines, question
+    retrieve_dataset = retrieve_dataset.map(lambda data: get_tokenized_len(data, tokenizer))  # Adds: tokenized_len
+
+    # Define the filtering condition
+    def filter_condition(data):
+        sample_length = data['tokenized_len']
         sample_length_level = (sample_length - 1) // 1024 + 1
-        if sample_length_level == length_level:
-            num += 1
+        return sample_length_level == length_level
 
-    assert num > 100
-    print("save to disk of path: ", output_path)
+    # Apply the filter to retain only desired samples
+    filtered_dataset = retrieve_dataset.filter(filter_condition)
 
+    # Count the number of filtered samples
+    num = len(filtered_dataset)  # If using Hugging Face Datasets, .num_rows can also be used
+    print("Number of filtered samples:", num)
+
+    # Ensure there are enough samples
+    assert num > 100, f"Number of samples ({num}) is not greater than 100."
+
+    # Save the filtered dataset to disk
+    print("Saving filtered dataset to path:", output_path)
     retrieve_dataset.save_to_disk(output_path)
-
-    # get the csv of key_id and num_lines
     key_id_df = retrieve_dataset.to_pandas()[["key_id", "num_lines"]].to_csv(os.path.join(output_path, "key_id.csv"), index=False)

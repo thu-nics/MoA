@@ -14,6 +14,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 from typing import Dict, Tuple, Optional
+import json
 
 from MoA.models.interface import update_model_function
 from MoA.attention.set import set_static_attention_lut
@@ -47,8 +48,10 @@ def process_prompt(input, model, tokenizer, test_case: Dict, output_file: Option
 
     device = getattr(model, "device", "cpu")
     
+    input = input.to(device)
+
     output = model.generate(
-        input.input_ids.to(device), 
+        **input, 
         max_new_tokens=100, 
         use_cache=use_cache,
         eos_token_id=stop_token_ids,
@@ -105,10 +108,10 @@ if __name__ == "__main__":
         "--dtype", type=str, choices=["fp16", "fp32", "bf16"], default="fp16"
     )
     parser.add_argument(
-        "--lut_path",
-        nargs="+",
+        "--moa_config",
         type=str,
-        help="List of paths to load efficient attention lut",
+        default=None,
+        help="the path to moa configuration file",
     )
     parser.add_argument('--not_permute_head', action='store_true')
     parser.add_argument(
@@ -165,7 +168,7 @@ if __name__ == "__main__":
     parser.add_argument('--dataset_path', type=str, default=None)
     args = parser.parse_args()
 
-    args.use_flash_attention = True if (args.lut_path is None) and (not args.use_streamingLLM) and (not args.h2o) else args.use_flash_attention # noqa: if lut_path is not None, use flash attention
+    args.use_flash_attention = True if (not args.use_streamingLLM) and (not args.h2o) and (args.moa_config is None) else args.use_flash_attention # noqa: if lut_path is not None, use flash attention
     print("using flash attention", args.use_flash_attention)
 
     # load tokenizer
@@ -177,13 +180,15 @@ if __name__ == "__main__":
     )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token_id = tokenizer.eos_token_id
 
     # define model config
     config = AutoConfig.from_pretrained(args.model_name)
     if args.use_flash_attention:
         config._attn_implementation = "flash_attention_2"
     else:
-        config._attn_implementation_internal = "eager"
+        config._attn_implementation_internal = "sdpa"
 
     # load model
     if args.dtype == 'fp16':
@@ -200,27 +205,18 @@ if __name__ == "__main__":
         config=config,
         device_map="auto",
         attn_implementation=(
-            "eager" if not args.use_flash_attention else "flash_attention_2"
+            "sdpa" if not args.use_flash_attention else "flash_attention_2"
         ),
         torch_dtype=dtype,
     ).eval()
-
-    model = update_model_function(model, args.model_name)
-
-    # use sparse decode and permute head
-    if args.lut_path is not None:
-        block_size = 64
-        sparse_decode = True
-        permute_head = True
-        if args.not_permute_head:
-            permute_head = False
-
-        model.model.use_block_sparse_attention_lut(permute_head, sparse_decode)
-        print("Using lut from {}, block size {}".format(args.lut_path, block_size))
-        print("permute head is set to be {}".format(permute_head))
-        set_static_attention_lut(
-            args.lut_path, None, model.model.layers, block_size, permute_head, sparse_decode,
-        )
+    
+    if args.moa_config is not None:
+        moa_config_path = args.moa_config
+        with open(moa_config_path, 'r') as f:
+            moa_config = json.load(f)
+        # Add mixture of sparse attention capability to the model
+        model = update_model_function(model, args.model_name)
+        model.model.set_mixture_of_attention(moa_config, permute_head=True)
 
     if model.generation_config.pad_token_id is None:
         model.generation_config.pad_token_id = tokenizer.pad_token_id
@@ -322,7 +318,8 @@ if __name__ == "__main__":
                 continue
 
             # retrieval test
-            is_correct, summary = process_prompt(input, model, tokenizer, data, stop_token_ids=stop_token_ids)
+            with torch.inference_mode():
+                is_correct, summary = process_prompt(input, model, tokenizer, data, stop_token_ids=stop_token_ids)
             
             # record
             pbar.write(f"Prompt_Length: {prompt_length}, Correct: {is_correct}, {summary}")
