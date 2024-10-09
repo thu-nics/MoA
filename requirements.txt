@@ -15,14 +15,16 @@ seaborn==0.13.2
 
 numpy==1.26.4
 
-# for longbench
+# For longbench
 tqdm
 rouge
 jieba
 fuzzywuzzy
 einops
 
-# for mask generation
+# For mask generation
 cvxpy
-Mosek
 gurobipy==11.0.1
+
+# Legacy requirements
+# Mosek

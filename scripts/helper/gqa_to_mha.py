@@ -7,7 +7,7 @@ import argparse
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--model_path", type=str, default='gradientai/Llama-3-8B-Instruct-262k')
-parser.add_argument("--output_path", type=str, default='llama-3-262k-expanded')
+parser.add_argument("--output_path", type=str, default='gradientai--Llama-3-8B-Instruct-262k-expanded')
 args = parser.parse_args()
 
 model_path = args.model_path
