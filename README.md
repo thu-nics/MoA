@@ -54,7 +54,7 @@ If you have trouble cloning the repo, it is probably because the repo's git-lfs 
 
 ### Group Query Attention Models
 
-If you are testing the accuracy of group query attention models with our kernel, please convert them to multi query attention models before profiling and inference. You can do so by running the `scripts/helper/gqa_to_mha.py` script.
+If you are testing the accuracy of group query attention models with our kernel, please convert them to multi head attention models before profiling and inference. You can do so by running the `scripts/helper/gqa_to_mha.py` script.
 
 ## Quick Start: Use Pre-defined Plans
 
