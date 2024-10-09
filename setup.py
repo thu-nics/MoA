@@ -8,7 +8,7 @@ with open("README.md", "r") as fh:
 
 setup(
     name="MoA",
-    version="0.2.0",
+    version="0.1.1",
     packages=setuptools.find_packages(),
     license="Apache-2.0",
     long_description=long_description,

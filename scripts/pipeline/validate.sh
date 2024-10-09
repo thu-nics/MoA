@@ -26,7 +26,7 @@ do
   RESULT_PATH="${RESULT_DIR}/validation_${i}.csv"
 
   # Run the Python command with the dynamically set paths
-  command="python scripts/pipeline/perplexity_evaluate.py \
+  command="CUDA_VISIBLE_DEVICES=0 python scripts/pipeline/perplexity_evaluate.py \
     --model_name $MODEL_NAME \
     --max_length ${length} \
     --dataset_dir $dataset_dir \

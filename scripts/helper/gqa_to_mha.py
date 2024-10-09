@@ -8,8 +8,7 @@ import argparse
 parser = argparse.ArgumentParser()
 
 parser.add_argument("--model_path", type=str, default='gradientai/Llama-3-8B-Instruct-262k')
-parser.add_argument("--output_path", type=str, default='gradientai-Llama-3-8B-Instruct-262k-expanded')
-
+parser.add_argument("--output_path", type=str, default='gradientai--Llama-3-8B-Instruct-262k-expanded')
 args = parser.parse_args()
 
 model_path = args.model_path
@@ -66,3 +65,4 @@ for decoder_layer1, decoder_layer2 in zip(model1.model.layers, model2.model.laye
     decoder_layer2.self_attn.v_proj = v_proj1
 
 model2.save_pretrained(args.output_path)
+tokenizer.save_pretrained(args.output_path)
