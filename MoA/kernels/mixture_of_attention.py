@@ -18,11 +18,15 @@ from typing import Optional, Union, List
 from MoA.attention.cache_utils import StaticCircularCache
 
 from MoA.kernels.flash_decoding_moa import _mixture_of_sparse_attention_decode
-from MoA.kernels.block_sparse_attention_lut import _sparse_attention_moa_prefill
+from MoA.kernels.block_sparse_attention_prefill import _sparse_attention_moa_prefill
 try:
     from flashinfer import moa_prefill, moa_decode
+    CUDA_KERNEL_AVAILABLE = True
 except ImportError:
-    print("Module 'flashinfer' is not available. Efficient sparse decoding is not supported. Try switching to our Triton implementation")
+    print("Module 'flashinfer' is not available. Efficient sparse decoding is not supported. Switching to the Triton implementation")
+    if torch.cuda.device_count() > 1:
+        raise NotImplementedError("Please install the MoA CUDA kernel for inference on multiple GPUs")
+    CUDA_KERNEL_AVAILABLE = False
 
 """
 used by FlashAttention2
@@ -380,7 +384,7 @@ def mixture_of_sparse_attention(
     Returns:
         The output tensor of shape `(batch_size, query_length, num_heads, head_dim)`.
     """
-    
+
     is_prefill = not (key.shape[-2] > query.shape[-2])
 
     if implementation in ["sdpa", "flash_attention2"]: # noqa, only used for debug purpose
@@ -400,43 +404,58 @@ def mixture_of_sparse_attention(
             BLOCK_M = 64
             BLOCK_N = 64
             """
-            Triton Implementation of MoA sparse prefill
-            """
-            # return _sparse_attention_moa_prefill.apply(
-            #     query, key, value, sm_scale, sink_size // BLOCK_N, local_size // BLOCK_N, BLOCK_M, BLOCK_N,
-            # ).transpose(1, 2)
-
-            """
             CUDA Implementation of MoA sparse prefill
             """
-            return moa_prefill(
-                query.transpose(1, 2).contiguous(),
-                key,
-                value,
-                causal=True,
-                num_global_blocks=sink_size // BLOCK_N,
-                num_band_blocks=local_size // BLOCK_N,
-                kv_layout="HND",
-            )
+            if CUDA_KERNEL_AVAILABLE:
+                return moa_prefill(
+                    query.transpose(1, 2).contiguous(),
+                    key,
+                    value,
+                    causal=True,
+                    num_global_blocks=sink_size // BLOCK_N,
+                    num_band_blocks=local_size // BLOCK_N,
+                    kv_layout="HND",
+                )
+
+            """
+            Triton Implementation of MoA sparse prefill
+            """
+            if not CUDA_KERNEL_AVAILABLE:
+                return _sparse_attention_moa_prefill.apply(
+                    query,
+                    key,
+                    value,
+                    sm_scale,
+                    sink_size // BLOCK_N,
+                    local_size // BLOCK_N,
+                    BLOCK_M,
+                    BLOCK_N,
+                ).transpose(1, 2).contiguous()
 
         else:
             """
-            Triton Implementation of MoA sparse decode
-            """
-            # return _mixture_of_sparse_attention_decode.apply(
-            #     query, key, value, head_index, sm_scale, causal
-            # ).transpose(1, 2)
-
-            """
             CUDA Implementation of MoA sparse decode
             """
-            return moa_decode(
-                query.transpose(1, 2).contiguous(),
-                key,
-                value,
-                head_start_index,
-                head_valid_length,
-                sm_scale,
-            )
+            if CUDA_KERNEL_AVAILABLE:
+                return moa_decode(
+                    query.transpose(1, 2).contiguous(),
+                    key,
+                    value,
+                    head_start_index,
+                    head_valid_length,
+                    sm_scale,
+                )
+
+            """
+            Triton Implementation of MoA sparse decode
+            """
+            if not CUDA_KERNEL_AVAILABLE:
+                raise NotImplementedError("Please install the MoA CUDA kernel for inference")
+                causal = True
+                head_index = StaticCircularCache.head_start_index_valid_length_to_head_index(head_start_index, head_valid_length)
+                return _mixture_of_sparse_attention_decode.apply(
+                    query, key, value, head_index, sm_scale, causal
+                ).transpose(1, 2).contiguous()
+
     else:
         raise NotImplementedError

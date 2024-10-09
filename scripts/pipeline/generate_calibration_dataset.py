@@ -81,8 +81,8 @@ get_model_response = functools.partial(
 
 if __name__ == "__main__":
     # the multi-round-qa dataset with human response
-    multi_round_qa_model_path = f"{output_path_base}/multi_qa_model/{model_name}/{dataset_name}"
-    multi_conversation_model_path = f"{output_path_base}/multi_conversation_model/{model_name}/{dataset_name}"
+    multi_round_qa_model_path = f"{output_path_base}/multi_qa_model/{dataset_name}"
+    multi_conversation_model_path = f"{output_path_base}/multi_conversation_model/{dataset_name}"
 
     # generate answers by model
     if True:

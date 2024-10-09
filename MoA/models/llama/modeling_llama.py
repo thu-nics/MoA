@@ -408,7 +408,7 @@ def LlamaModel_set_mixture_of_attention(
 Deprecated
 Efficient block sparse llama attention using lut
 """
-from MoA.kernels.block_sparse_attention_lut import sparse_attention
+from MoA.kernels.block_sparse_attention_prefill import sparse_attention
 
 def lut_to_single_query_kv_mask(
     lut: torch.Tensor,
