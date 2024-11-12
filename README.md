@@ -138,7 +138,7 @@ model_name = "lmsys/vicuna-7b-v1.5-16k"
 model = AutoModelForCausalLM.from_pretrained(model_name)
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 
-moa_config_path = "examples/lmsys-vicuna-7b-v1.5-16k/moa_alpha_beta.json"
+moa_config_path = "examples/lmsys--vicuna-7b-v1.5-16k/moa_alpha_beta.json"
 with open(moa_config_path, 'r') as f:
     moa_config = json.load(f)
 # Add mixture of sparse attention capability to the model
@@ -163,7 +163,7 @@ CUDA_VISIBLE_DEVICES=0 python scripts/evaluate/retrieval_evaluate.py --model_nam
 > Alternatively, you can use our example plans. When passing in multiple plans at different lengths, the correct length will be automatically selected according to the input length:
 > 
 > ```bash
-> CUDA_VISIBLE_DEVICES=0 python scripts/evaluate/retrieval_evaluate.py --model_name lmsys/vicuna-7b-v1.5-16k --moa_config examples/lmsys-vicuna-7b-v1.5-16k/moa_alpha_beta.json --output_dir output/lmsys--vicuna-7b-v1.5-16k/evaluate/retrieval --length_level 8
+> CUDA_VISIBLE_DEVICES=0 python scripts/evaluate/retrieval_evaluate.py --model_name lmsys/vicuna-7b-v1.5-16k --moa_config examples/lmsys--vicuna-7b-v1.5-16k/moa_alpha_beta.json --output_dir output/lmsys--vicuna-7b-v1.5-16k/evaluate/retrieval --length_level 8
 > ```
 
 ### LongBench
@@ -186,7 +186,7 @@ CUDA_VISIBLE_DEVICES=0 python scripts/evaluate/longbench_evaluate.py --model_nam
 To chat with the model using the example plans, run the following command:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python scripts/evaluate/chat_demo.py --model_name lmsys/vicuna-7b-v1.5-16k --moa_config examples/lmsys-vicuna-7b-v1.5-16k/moa_alpha_beta.json --batch_size 16
+CUDA_VISIBLE_DEVICES=0 python scripts/evaluate/chat_demo.py --model_name lmsys/vicuna-7b-v1.5-16k --moa_config examples/lmsys--vicuna-7b-v1.5-16k/moa_alpha_beta.json --batch_size 16
 ```
 
 > Currently, the input prompt should have at least 64 tokens.
