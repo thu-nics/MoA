@@ -3,30 +3,6 @@ import torch
 import torch.nn as nn
 import argparse
 
-## for llama-3 accuracy test only ##
-
-parser = argparse.ArgumentParser()
-
-parser.add_argument("--model_path", type=str, default='gradientai/Llama-3-8B-Instruct-262k')
-parser.add_argument("--output_path", type=str, default='gradientai--Llama-3-8B-Instruct-262k-expanded')
-args = parser.parse_args()
-
-model_path = args.model_path
-
-config = AutoConfig.from_pretrained(model_path)
-
-tokenizer = AutoTokenizer.from_pretrained(model_path)
-model1 = LlamaForCausalLM.from_pretrained(model_path, torch_dtype=torch.float16)
-
-# allow mismatch
-num_attention_heads = model1.config.num_attention_heads
-print(f"convert to {num_attention_heads} KV heads")
-model2 = LlamaForCausalLM.from_pretrained(model_path, torch_dtype=torch.float16, num_key_value_heads=num_attention_heads, ignore_mismatched_sizes=True)
-
-num_key_value_heads = config.num_key_value_heads
-num_heads = config.num_attention_heads
-num_key_value_groups =num_heads // num_key_value_heads
-
 def expand_proj(
     layer: nn.Linear,
     num_key_value_groups: int,
@@ -53,16 +29,44 @@ def expand_proj(
 
     return
 
-for decoder_layer1, decoder_layer2 in zip(model1.model.layers, model2.model.layers):
-    self_attn1 = decoder_layer1.self_attn
-    k_proj1 = self_attn1.k_proj
-    v_proj1 = self_attn1.v_proj
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
 
-    expand_proj(k_proj1, num_key_value_groups, num_key_value_heads)
-    expand_proj(v_proj1, num_key_value_groups, num_key_value_heads)
+    parser.add_argument("--model_path", type=str, default='gradientai/Llama-3-8B-Instruct-262k')
+    parser.add_argument("--output_path", type=str, default='gradientai--Llama-3-8B-Instruct-262k-expanded')
+    args = parser.parse_args()
 
-    decoder_layer2.self_attn.k_proj = k_proj1
-    decoder_layer2.self_attn.v_proj = v_proj1
+    model_path = args.model_path
 
-model2.save_pretrained(args.output_path)
-tokenizer.save_pretrained(args.output_path)
+    config = AutoConfig.from_pretrained(model_path)
+
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    model1 = LlamaForCausalLM.from_pretrained(model_path, torch_dtype=torch.float16)
+
+    # allow mismatch
+    num_attention_heads = model1.config.num_attention_heads
+    print(f"convert to {num_attention_heads} KV heads")
+    model2 = LlamaForCausalLM.from_pretrained(
+        model_path, 
+        torch_dtype=torch.float16, 
+        num_key_value_heads=num_attention_heads, 
+        ignore_mismatched_sizes=True
+    )
+
+    num_key_value_heads = config.num_key_value_heads
+    num_heads = config.num_attention_heads
+    num_key_value_groups = num_heads // num_key_value_heads
+
+    for decoder_layer1, decoder_layer2 in zip(model1.model.layers, model2.model.layers):
+        self_attn1 = decoder_layer1.self_attn
+        k_proj1 = self_attn1.k_proj
+        v_proj1 = self_attn1.v_proj
+
+        expand_proj(k_proj1, num_key_value_groups, num_key_value_heads)
+        expand_proj(v_proj1, num_key_value_groups, num_key_value_heads)
+
+        decoder_layer2.self_attn.k_proj = k_proj1
+        decoder_layer2.self_attn.v_proj = v_proj1
+
+    model2.save_pretrained(args.output_path)
+    tokenizer.save_pretrained(args.output_path)

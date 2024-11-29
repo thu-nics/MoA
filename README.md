@@ -65,7 +65,15 @@ If you want to compress other models, you can follow the `Automatic Search Pipel
 
 ## Automatic Search Pipeline
 
-The pipeline automatically compresses the LLM, beginning with the creation of a calibration dataset that includes long dependency and model alignment. This dataset is used for gradient-based profiling to assess the impact of each attention position on prediction loss. Following profiling, MoA optimizes sparse attention configurations for each model layer and attention head, aiming to minimize accuracy loss within specified density budgets.
+The pipeline automatically compresses the LLM by finding the optimal MoA configurations for each attention head and layer. The pipeline consists of four steps: calibration dataset generation, profile, optimize, and validate.
+
+To run the entire pipeline with one line of code, use `scripts/pipeline/main.py`. For GQA models, add parameter `--is_gqa`. For the vicuna example:
+
+```bash
+python scripts/pipeline/main.py --model_path lmsys/vicuna-7b-v1.5-16k --model_name lmsys--vicuna-7b-v1.5-16k
+```
+
+After the pipeline completes, you can evaluate the model with the generated plans using the `Evaluation` section. If you want to understand the pipeline in detail, you can follow the below steps instead.
 
 ### Calibration Dataset Generation
 
