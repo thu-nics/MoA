@@ -1,9 +1,5 @@
 # MoA: Mixture of Sparse Attention for Automatic Large Language Model Compression
 
-## News
-
-- [2024/10] MoA kernel is now available in [CUDA](https://github.com/thu-nics/MoA_Kernel), achieving faster inference speed.
-
 ## Environment Setup
 
 First, create the Conda environment and install the relevant packages using the following commands:
