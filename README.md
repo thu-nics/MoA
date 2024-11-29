@@ -156,6 +156,3 @@ To chat with the model using the example plans, run the following command:
 ```bash
 CUDA_VISIBLE_DEVICES=0 python scripts/evaluate/chat_demo.py --model_name lmsys/vicuna-7b-v1.5-16k --moa_config examples/lmsys--vicuna-7b-v1.5-16k/moa_alpha_beta.json --batch_size 16
 ```
-
-> Currently, the input prompt should have at least 64 tokens.
-
