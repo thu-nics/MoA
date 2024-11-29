@@ -158,7 +158,7 @@ def parse_args():
     )
 
     parser.add_argument(
-        "--evaluation_dataset", type=str, nargs='*', default=None,
+        "--evaluation_dataset", type=str, nargs='+', default=None,
     )
 
     parser.add_argument(

@@ -1,5 +1,9 @@
 # MoA: Mixture of Sparse Attention for Automatic Large Language Model Compression
 
+## News
+
+- [2024/10] MoA kernel is now available in [CUDA](https://github.com/thu-nics/MoA_Kernel), achieving faster inference speed.
+
 ## Environment Setup
 
 First, create the Conda environment and install the relevant packages using the following commands:
@@ -25,7 +29,15 @@ If you want to compress other models, you can follow the `Automatic Search Pipel
 
 ## Automatic Search Pipeline
 
-The pipeline automatically compresses the LLM, beginning with the creation of a calibration dataset that includes long dependency and model alignment. This dataset is used for gradient-based profiling to assess the impact of each attention position on prediction loss. Following profiling, MoA optimizes sparse attention configurations for each model layer and attention head, aiming to minimize accuracy loss within specified density budgets.
+The pipeline automatically compresses the LLM by finding the optimal MoA configurations for each attention head and layer. The pipeline consists of four steps: calibration dataset generation, profile, optimize, and validate.
+
+To run the entire pipeline with one line of code, use `scripts/pipeline/main.py`. For GQA models, add parameter `--is_gqa`. For the vicuna example:
+
+```bash
+python scripts/pipeline/main.py --model_path lmsys/vicuna-7b-v1.5-16k --model_name lmsys--vicuna-7b-v1.5-16k
+```
+
+After the pipeline completes, you can evaluate the model with the generated plans using the `Evaluation` section. If you want to understand the pipeline in detail, you can follow the below steps instead.
 
 ### Calibration Dataset Generation
 
@@ -33,18 +45,18 @@ MoA creates the calibration dataset with long dependency and model alignment. We
 This involves querying an LLM with original questions to collect its responses, which are then formatted into a standard Hugging Face `Dataset` item.
 
 ```bash
-python scripts/pipeline/generate_calibration_dataset.py --model_path lmsys/vicuna-7b-v1.5-16k --model_name vicuna-7b-v1.5-16k --output_path_base local/dataset
+python scripts/pipeline/generate_calibration_dataset.py --model_path lmsys/vicuna-7b-v1.5-16k --model_name vicuna-7b-v1.5-16k --output_path_base output/lmsys--vicuna-7b-v1.5-16k/dataset
 ```
 
 ### Profile
 MoA employs a gradient based method to quantify the importance of the attention values. The `--response_mask` option specifies that only the model's responses are used as supervision. Given the calibration dataset, the profile process outputs the average attention influence tensor at a specific sequence length.
 
 ```bash
-python scripts/pipeline/pipeline_profile.py --model_name lmsys/vicuna-7b-v1.5-16k --max_length 2048 --response_mask --dataset_dir local/dataset/multi_conversation_model/vicuna-7b-v1.5-16k/multi_news --grad_dir 7b/profile_2k
+python scripts/pipeline/pipeline_profile.py --model_name lmsys/vicuna-7b-v1.5-16k --max_length 2048 --response_mask --dataset_dir output/lmsys--vicuna-7b-v1.5-16k/dataset/multi_conversation_model/multi_news --grad_dir output/lmsys--vicuna-7b-v1.5-16k/profile/profile_2k
 
-python scripts/pipeline/pipeline_profile.py --model_name lmsys/vicuna-7b-v1.5-16k --max_length 4096 --response_mask --dataset_dir local/dataset/multi_conversation_model/vicuna-7b-v1.5-16k/multi_news --grad_dir 7b/profile_4k
+python scripts/pipeline/pipeline_profile.py --model_name lmsys/vicuna-7b-v1.5-16k --max_length 4096 --response_mask --dataset_dir output/lmsys--vicuna-7b-v1.5-16k/dataset/multi_conversation_model/multi_news --grad_dir output/lmsys--vicuna-7b-v1.5-16k/profile/profile_4k
 
-python scripts/pipeline/pipeline_profile.py --model_name lmsys/vicuna-7b-v1.5-16k --max_length 8192 --response_mask --dataset_dir local/dataset/multi_conversation_model/vicuna-7b-v1.5-16k/multi_news --grad_dir 7b/profile_8k
+python scripts/pipeline/pipeline_profile.py --model_name lmsys/vicuna-7b-v1.5-16k --max_length 8192 --response_mask --dataset_dir output/lmsys--vicuna-7b-v1.5-16k/dataset/multi_conversation_model/multi_news --grad_dir output/lmsys--vicuna-7b-v1.5-16k/profile/profile_8k
 ```
 
 ### Optimize
@@ -52,7 +64,7 @@ python scripts/pipeline/pipeline_profile.py --model_name lmsys/vicuna-7b-v1.5-16
 MoA identifies Pareto front compression plans to  minimize accuracy losses across various sequence lengths under density budget. The `--elastic_length` option specifies the sequence lengths for which profile are done, `--extend_length` determines the maximum length which we wish the compression plan to extend to, and `--density_bounds` sets the maximum allowable attention density for each length.
 
 ```bash
-python scripts/pipeline/elastic_generate.py --output_dir 7b/lut_result --elastic_length 2048 4096 8192 --extend_length 16384 --density_bounds 0.5 0.5 0.5 0.5 --importance_tensor_dir 7b/ --output_length 4096 8192 12288 16384
+python scripts/pipeline/elastic_generate.py --output_dir output/lmsys--vicuna-7b-v1.5-16k/optimize --elastic_length 2048 4096 8192 --extend_length 16384 --density_bounds 0.5 0.5 0.5 0.5 --importance_tensor_dir output/lmsys--vicuna-7b-v1.5-16k/profile/ --output_length 4096 8192 12288 16384
 ```
 
 You can set `--time_limit num` to specify the maximum duration (in seconds) for each single objective optimization. Also you might need to apply for the gurobi license on the [official website](https://www.gurobi.com/) to use the optimization library.
@@ -64,19 +76,19 @@ MoA selects the plan that yields minimum loss at unseen length among the Pareto 
 To evaluate the loss of a certain plan on a specified length level, use the following command, replacing `{i}` with the actual plan ID:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python scripts/pipeline/perplexity_evaluate.py --model_name lmsys/vicuna-7b-v1.5-16k --max_length 12288 --dataset_dir nics-efc/MoA_Long_HumanQA --split valid --response_mask --lut_path 7b/lut_result/lut_12288_plan_{i}.pt  --result_path validation_test.csv 
+CUDA_VISIBLE_DEVICES=0 python scripts/pipeline/perplexity_evaluate.py --model_name lmsys/vicuna-7b-v1.5-16k --max_length 12288 --dataset_dir nics-efc/MoA_Long_HumanQA --split valid --response_mask --moa_config output/lmsys--vicuna-7b-v1.5-16k/optimize/moa_config_plan_{i}.json  --result_path output/lmsys--vicuna-7b-v1.5-16k/validate/validate_0.csv
 ```
 
 Alternatively, to evaluate all plans within a directory, run the following script:
 
-```
+```bash
 scripts/pipeline/validate.sh <moa_config_dir> <moa_config_num> <result_dir> <model_name>
 ```
 
 For example
 
-```
-scripts/pipeline/validate.sh 7b/lut_result <plan_num> 7b/validate_result lmsys/vicuna-7b-v1.5-16k
+```bash
+scripts/pipeline/validate.sh output/lmsys--vicuna-7b-v1.5-16k/optimize/ <plan_num> output/lmsys--vicuna-7b-v1.5-16k/validate lmsys/vicuna-7b-v1.5-16k
 ```
 
 Replace <plan_num> with the number of plans under the directory.
@@ -92,14 +104,13 @@ Given the compression plan found by MoA, you can simply apply the plan to the mo
 ```python
 from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
 from MoA.models.interface import update_model_function
-from MoA.attention.set import set_static_attention_lut
 
 # Load the huggingface model
 model_name = "lmsys/vicuna-7b-v1.5-16k"
 model = AutoModelForCausalLM.from_pretrained(model_name)
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 
-moa_config_path = "examples/lmsys-vicuna-7b-v1.5-16k/moa_alpha_beta.json"
+moa_config_path = "examples/lmsys--vicuna-7b-v1.5-16k/moa_alpha_beta.json"
 with open(moa_config_path, 'r') as f:
     moa_config = json.load(f)
 # Add mixture of sparse attention capability to the model
@@ -118,13 +129,13 @@ output = pipe(prompt)
 MoA aims to preserve the retrieval ability of the original dense model with a reduced impact on accuracy. To evaluate the retrieval performance of a specific plan at a given input length, use the following command, replacing `{i}` with the actual plan ID:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python scripts/evaluate/retrieval_evaluate.py --model_name lmsys/vicuna-7b-v1.5-16k --moa_config 7b/lut_result/lut_8192_plan_{i}.json --output_dir 7b/retrieval_8k --length_level 8
+CUDA_VISIBLE_DEVICES=0 python scripts/evaluate/retrieval_evaluate.py --model_name lmsys/vicuna-7b-v1.5-16k --moa_config output/lmsys--vicuna-7b-v1.5-16k/optimize/moa_config_plan_{i}.json --output_dir output/lmsys--vicuna-7b-v1.5-16k/evaluate/retrieval --length_level 8
 ```
 
 > Alternatively, you can use our example plans. When passing in multiple plans at different lengths, the correct length will be automatically selected according to the input length:
 > 
 > ```bash
-> CUDA_VISIBLE_DEVICES=0 python scripts/evaluate/retrieval_evaluate.py --model_name lmsys/vicuna-7b-v1.5-16k --moa_config examples/lmsys-vicuna-7b-v1.5-16k/moa_alpha_beta.json --output_dir 7b/retrieval_8k --length_level 8
+> CUDA_VISIBLE_DEVICES=0 python scripts/evaluate/retrieval_evaluate.py --model_name lmsys/vicuna-7b-v1.5-16k --moa_config examples/lmsys--vicuna-7b-v1.5-16k/moa_alpha_beta.json --output_dir output/lmsys--vicuna-7b-v1.5-16k/evaluate/retrieval --length_level 8
 > ```
 
 ### LongBench
@@ -133,11 +144,11 @@ MoA strives to maintain the long-context understanding ability of the original d
 
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python scripts/evaluate/longbench_evaluate.py --model_name lmsys/vicuna-7b-v1.5-16k --max_length 3500 --eval longbench_fast --longbench_e --longbench_result_dir 7b/longbench_result --longbench_length_range 0-4k --moa_config 7b/lut_result/plan_{i}.json
+CUDA_VISIBLE_DEVICES=0 python scripts/evaluate/longbench_evaluate.py --model_name lmsys/vicuna-7b-v1.5-16k --max_length 3500 --eval longbench_fast --longbench_e --longbench_result_dir output/lmsys--vicuna-7b-v1.5-16k/evaluate/longbench --longbench_length_range 0-4k --moa_config output/lmsys--vicuna-7b-v1.5-16k/optimize/moa_config_plan_{i}.json
 
-CUDA_VISIBLE_DEVICES=0 python scripts/evaluate/longbench_evaluate.py --model_name lmsys/vicuna-7b-v1.5-16k --max_length 7500 --eval longbench_fast --longbench_e --longbench_result_dir 7b/longbench_result --longbench_length_range 4-8k --moa_config 7b/lut_result/plan_{i}.json
+CUDA_VISIBLE_DEVICES=0 python scripts/evaluate/longbench_evaluate.py --model_name lmsys/vicuna-7b-v1.5-16k --max_length 7500 --eval longbench_fast --longbench_e --longbench_result_dir output/lmsys--vicuna-7b-v1.5-16k/evaluate/longbench --longbench_length_range 4-8k --moa_config output/lmsys--vicuna-7b-v1.5-16k/optimize/moa_config_plan_{i}.json
 
-CUDA_VISIBLE_DEVICES=0 python scripts/evaluate/longbench_evaluate.py --model_name lmsys/vicuna-7b-v1.5-16k --max_length 15500 --eval longbench_fast --longbench_e --longbench_result_dir 7b/longbench_result --longbench_length_range 8k+ --moa_config 7b/lut_result/plan_{i}.json
+CUDA_VISIBLE_DEVICES=0 python scripts/evaluate/longbench_evaluate.py --model_name lmsys/vicuna-7b-v1.5-16k --max_length 15500 --eval longbench_fast --longbench_e --longbench_result_dir output/lmsys--vicuna-7b-v1.5-16k/evaluate/longbench --longbench_length_range 8k+ --moa_config output/lmsys--vicuna-7b-v1.5-16k/optimize/moa_config_plan_{i}.json
 ```
 
 > Alternatively, you can use our example plans.
@@ -147,9 +158,8 @@ CUDA_VISIBLE_DEVICES=0 python scripts/evaluate/longbench_evaluate.py --model_nam
 To chat with the model using the example plans, run the following command:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python scripts/evaluate/chat_demo.py --model_name lmsys/vicuna-7b-v1.5-16k --moa_config examples/lmsys-vicuna-7b-v1.5-16k/moa_alpha_beta.json --batch_size 16
+CUDA_VISIBLE_DEVICES=0 python scripts/evaluate/chat_demo.py --model_name lmsys/vicuna-7b-v1.5-16k --moa_config examples/lmsys--vicuna-7b-v1.5-16k/moa_alpha_beta.json --batch_size 16
 ```
 
 > Currently, the input prompt should have at least 64 tokens.
-
 

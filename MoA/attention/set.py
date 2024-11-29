@@ -22,4 +22,4 @@ def set_static_attention_lut(attention_lut_path_list: List[str], attention_lut_f
 
     # set the attention lut and lut_for_head for each layer
     for layer_index, layer in enumerate(model_layers):
-        layer.set_static_attention_lut([lut[layer_index].to('cuda') for lut in lut_list], None, block_size, 'cuda', permute_head, sparse_decode)
+        layer.set_static_attention_lut([lut[layer_index] for lut in lut_list], None, block_size=block_size, device=None, permute_head=permute_head, sparse_decode=sparse_decode)

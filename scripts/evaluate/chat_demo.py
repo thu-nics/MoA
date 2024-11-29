@@ -28,6 +28,7 @@ if __name__ == "__main__":
     device_map = "auto"
     model = AutoModelForCausalLM.from_pretrained(model_name, device_map=device_map, torch_dtype=torch.float16)
     tokenizer = AutoTokenizer.from_pretrained(model_name)
+    pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
 
     if args.moa_config is not None:
         moa_config_path = args.moa_config
@@ -62,19 +63,19 @@ if __name__ == "__main__":
             conv.append_message(conv.roles[1], None)
             prompt = conv.get_prompt()
 
-            input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(model.device)
+            inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
 
             """Start Recoding Time and Memory Usage"""
             start_event.record()
             torch.cuda.reset_peak_memory_stats()
 
             outputs = model.generate(
-                input_ids,
+                **inputs,
                 max_new_tokens=1024*1,
                 do_sample=True,
                 # temperature=0.6,
                 # top_p=0.9,
-                num_return_sequences=num_return_sequences,
+                num_return_sequences=num_return_sequences
             )
 
             end_event.record()
@@ -83,14 +84,14 @@ if __name__ == "__main__":
             max_memory = torch.cuda.max_memory_allocated() / 2**30
             """End Recoding Time and Memory Usage"""
 
-            response = outputs[..., input_ids.shape[-1]:]
+            response = outputs[..., inputs.input_ids.shape[-1]:]
             response_texts = tokenizer.batch_decode(response, skip_special_tokens=True)
 
             for i, response_text in enumerate(response_texts):
                 print(f"\n\n**************Response {i+1}*******************\n\n{response_text}")
 
-            model_response_lengths = torch.sum(response!=tokenizer.pad_token_id, dim=-1)
-            input_lengths = torch.sum(input_ids!=tokenizer.pad_token_id, dim=-1).expand((args.batch_size))
+            model_response_lengths = torch.sum(response!=pad_token_id, dim=-1)
+            input_lengths = torch.sum(inputs.input_ids!=pad_token_id, dim=-1).expand((args.batch_size))
 
             total_length = input_lengths + model_response_lengths
             throughput = torch.sum(model_response_lengths).item() * 1000 / elapsed_time_ms # in token/s

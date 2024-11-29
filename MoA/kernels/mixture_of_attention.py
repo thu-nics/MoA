@@ -18,11 +18,20 @@ from typing import Optional, Union, List
 from MoA.attention.cache_utils import StaticCircularCache
 
 from MoA.kernels.flash_decoding_moa import _mixture_of_sparse_attention_decode
-from MoA.kernels.block_sparse_attention_lut import _sparse_attention_moa_prefill
+from MoA.kernels.block_sparse_attention_prefill import _sparse_attention_moa_prefill
 try:
     from flashinfer import moa_prefill, moa_decode
+    CUDA_KERNEL_AVAILABLE = True
+    # kernel settings
+    BLOCK_M = 64
+    BLOCK_N = 64
 except ImportError:
-    print("Module 'flashinfer' is not available. Efficient sparse decoding is not supported. Try switching to our Triton implementation")
+    print("Module 'flashinfer' is not available. Efficient sparse decoding is not supported. Switching to the Triton implementation")
+    if torch.cuda.device_count() > 1:
+        raise NotImplementedError("Please install the MoA CUDA kernel for inference on multiple GPUs")
+    CUDA_KERNEL_AVAILABLE = False
+
+import warnings
 
 """
 used by FlashAttention2
@@ -195,7 +204,7 @@ class _adapt_mixture_of_sparse_attention(torch.autograd.Function):
             o: (Z, H, N_IN, L)
         """
         dtype = q.dtype
-        assert dtype == torch.float16
+        assert (dtype == torch.float16) or (dtype == torch.bfloat16)
 
         bsz, num_heads, q_len, _ = q.shape
         _is_decode = q_len == 1
@@ -380,13 +389,28 @@ def mixture_of_sparse_attention(
     Returns:
         The output tensor of shape `(batch_size, query_length, num_heads, head_dim)`.
     """
-    
+
     is_prefill = not (key.shape[-2] > query.shape[-2])
+
+    if is_prefill:
+        avg_key_value_length = key.shape[-2] # For prefill, it is key_length; For sparse decode, it is \sum_H num_cache_heads_h
+    elif not is_prefill and head_valid_length is not None:
+        avg_key_value_length = int(head_valid_length.to(key.dtype).mean().item())
+    else:
+        warnings.warn("Cannot determine the average key value length. Falling back to dense prefill and slow sparse decode.")
+        avg_key_value_length = key.shape[-2] # noqa
+        
+    fall_back_to_dense = (avg_key_value_length <= BLOCK_N) and is_prefill
+    if fall_back_to_dense:
+        warnings.warn(f"Falling back to dense prefill and slow sparse decode due to small key/value length {avg_key_value_length}.")
+        implementation = "sdpa"
 
     if implementation in ["sdpa", "flash_attention2"]: # noqa, only used for debug purpose
         if is_prefill:
+            # dense prefill
             head_index = None
         else:
+            # sparse decode
             head_index = StaticCircularCache.head_start_index_valid_length_to_head_index(head_start_index, head_valid_length)
         # use dense prefill and sparse decode with flash attention 1 or 2
         return _adapt_mixture_of_sparse_attention.apply(
@@ -396,47 +420,59 @@ def mixture_of_sparse_attention(
     elif implementation == "moa":
         if is_prefill:
             # note that qkv are not contiguous for prefill
-
-            BLOCK_M = 64
-            BLOCK_N = 64
-            """
-            Triton Implementation of MoA sparse prefill
-            """
-            # return _sparse_attention_moa_prefill.apply(
-            #     query, key, value, sm_scale, sink_size // BLOCK_N, local_size // BLOCK_N, BLOCK_M, BLOCK_N,
-            # ).transpose(1, 2)
-
             """
             CUDA Implementation of MoA sparse prefill
             """
-            return moa_prefill(
-                query.transpose(1, 2).contiguous(),
-                key,
-                value,
-                causal=True,
-                num_global_blocks=sink_size // BLOCK_N,
-                num_band_blocks=local_size // BLOCK_N,
-                kv_layout="HND",
-            )
+            if CUDA_KERNEL_AVAILABLE:
+                return moa_prefill(
+                    query.transpose(1, 2).contiguous(),
+                    key,
+                    value,
+                    causal=True,
+                    num_global_blocks=sink_size // BLOCK_N,
+                    num_band_blocks=local_size // BLOCK_N,
+                    kv_layout="HND",
+                )
+
+            """
+            Triton Implementation of MoA sparse prefill
+            """
+            if not CUDA_KERNEL_AVAILABLE:
+                return _sparse_attention_moa_prefill.apply(
+                    query,
+                    key,
+                    value,
+                    sm_scale,
+                    sink_size // BLOCK_N,
+                    local_size // BLOCK_N,
+                    BLOCK_M,
+                    BLOCK_N,
+                ).transpose(1, 2).contiguous()
 
         else:
             """
-            Triton Implementation of MoA sparse decode
-            """
-            # return _mixture_of_sparse_attention_decode.apply(
-            #     query, key, value, head_index, sm_scale, causal
-            # ).transpose(1, 2)
-
-            """
             CUDA Implementation of MoA sparse decode
             """
-            return moa_decode(
-                query.transpose(1, 2).contiguous(),
-                key,
-                value,
-                head_start_index,
-                head_valid_length,
-                sm_scale,
-            )
+            if CUDA_KERNEL_AVAILABLE:
+                return moa_decode(
+                    query.transpose(1, 2).contiguous(),
+                    key,
+                    value,
+                    head_start_index,
+                    head_valid_length,
+                    sm_scale,
+                )
+
+            """
+            Triton Implementation of MoA sparse decode
+            """
+            if not CUDA_KERNEL_AVAILABLE:
+                raise NotImplementedError("Please install the MoA CUDA kernel for inference")
+                causal = True
+                head_index = StaticCircularCache.head_start_index_valid_length_to_head_index(head_start_index, head_valid_length)
+                return _mixture_of_sparse_attention_decode.apply(
+                    query, key, value, head_index, sm_scale, causal
+                ).transpose(1, 2).contiguous()
+
     else:
         raise NotImplementedError

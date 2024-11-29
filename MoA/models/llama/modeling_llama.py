@@ -54,12 +54,13 @@ def LlamaModel_MixtureAttention_forward(
     input_ids: torch.LongTensor = None,
     attention_mask: Optional[torch.Tensor] = None,
     position_ids: Optional[torch.LongTensor] = None,
-    past_key_values: Optional[List[torch.FloatTensor]] = None,
+    past_key_values: Optional[Union[StaticCircularCache, List[torch.FloatTensor]]] = None,
     inputs_embeds: Optional[torch.FloatTensor] = None,
     use_cache: Optional[bool] = None,
     output_attentions: Optional[bool] = None,
     output_hidden_states: Optional[bool] = None,
     return_dict: Optional[bool] = None,
+    cache_position: Optional[torch.LongTensor] = None,
 ) -> Union[Tuple, BaseModelOutputWithPast]:
     output_attentions = (
         output_attentions
@@ -72,15 +73,11 @@ def LlamaModel_MixtureAttention_forward(
         else self.config.output_hidden_states
     )
     use_cache = use_cache if use_cache is not None else self.config.use_cache
+    return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-    return_dict = (
-        return_dict if return_dict is not None else self.config.use_return_dict
-    )
-
-    # retrieve input_ids and inputs_embeds
-    if input_ids is not None and inputs_embeds is not None:
+    if (input_ids is None) ^ (inputs_embeds is not None):
         raise ValueError(
-            "You cannot specify both input_ids and inputs_embeds at the same time"
+            "You cannot specify both input_ids and inputs_embeds at the same time, and must specify either one"
         )
     elif input_ids is not None:
         batch_size, seq_length = input_ids.shape[:2]
@@ -89,23 +86,24 @@ def LlamaModel_MixtureAttention_forward(
     else:
         raise ValueError("You have to specify either input_ids or inputs_embeds")
 
-    if self.gradient_checkpointing and self.training:
-        if use_cache:
-            logger.warning_once(
-                "`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`..."
-            )
-            use_cache = False
+    if self.gradient_checkpointing and self.training and use_cache:
+        logger.warning_once(
+            "`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`."
+        )
+        use_cache = False
 
-    past_key_values_length = 0
+    if inputs_embeds is None:
+        inputs_embeds = self.embed_tokens(input_ids)
+
     ### prepare cache ###
     if use_cache:
-        if past_key_values is None:
+        if not isinstance(past_key_values, StaticCircularCache):
             # initialize the cache
             head_dim = self.config.hidden_size // self.config.num_attention_heads
             cache_config = moa_config_to_cache_config(
                 self.moa_config,
                 seq_len=seq_length,
-                max_new_token=1024,
+                max_new_token=self.moa_max_new_token,
                 sink_size=64,
                 minimum_cache_size=128,
                 split_size=64,
@@ -117,22 +115,17 @@ def LlamaModel_MixtureAttention_forward(
                 head_dim=head_dim,
                 device=self.device,
                 dtype=self.dtype,
+                update_cache_content=True
             )
-        past_key_values_length = past_key_values.get_seq_length()  # noqa
     ### end of perpare cache ###
 
-    if position_ids is None:
-        device = input_ids.device if input_ids is not None else inputs_embeds.device
-        position_ids = torch.arange(
-            past_key_values_length,
-            seq_length + past_key_values_length,
-            dtype=torch.long,
-            device=device,
+    if cache_position is None:
+        past_cache_position = past_key_values.get_seq_length() if past_key_values is not None else 0
+        cache_position = torch.arange(
+            past_cache_position, past_cache_position + inputs_embeds.shape[1], device=inputs_embeds.device
         )
-        position_ids = position_ids.unsqueeze(0)
-
-    if inputs_embeds is None:
-        inputs_embeds = self.embed_tokens(input_ids)
+    if position_ids is None:
+        position_ids = cache_position.unsqueeze(0)
 
     ### modification ###
     attention_mask = (
@@ -142,9 +135,14 @@ def LlamaModel_MixtureAttention_forward(
         raise NotImplementedError(
             "output_attentions is not supported in mixture of attention"
         )
-    # embed positions
+    causal_mask = self._update_causal_mask(
+        attention_mask, inputs_embeds, cache_position, past_key_values, output_attentions
+    )
     hidden_states = inputs_embeds
-    inputs_embeds = None
+
+    # create position embeddings to be shared across the decoder layers
+    position_embeddings = self.rotary_emb(hidden_states, position_ids)
+
     ### end of modification ###
 
     # decoder layers
@@ -160,20 +158,24 @@ def LlamaModel_MixtureAttention_forward(
             layer_outputs = self._gradient_checkpointing_func(
                 decoder_layer.__call__,
                 hidden_states,
-                attention_mask,
+                causal_mask,
                 position_ids,
                 past_key_values,
                 output_attentions,
                 use_cache,
+                cache_position,
+                position_embeddings,
             )
         else:
             layer_outputs = decoder_layer(
                 hidden_states,
-                attention_mask=attention_mask,
+                attention_mask=causal_mask,
                 position_ids=position_ids,
                 past_key_value=past_key_values,
                 output_attentions=output_attentions,
                 use_cache=use_cache,
+                cache_position=cache_position,
+                position_embeddings=position_embeddings,
             )
 
         hidden_states = layer_outputs[0]
@@ -190,17 +192,10 @@ def LlamaModel_MixtureAttention_forward(
     if output_hidden_states:
         all_hidden_states += (hidden_states,)
 
-    next_cache = None
-    if use_cache:
-        ### modification ###
-        next_cache = next_decoder_cache
-        ### end of modification ###
+    next_cache = next_decoder_cache if use_cache else None
+
     if not return_dict:
-        return tuple(
-            v
-            for v in [hidden_states, next_cache, all_hidden_states, all_self_attns]
-            if v is not None
-        )
+        return tuple(v for v in [hidden_states, next_cache, all_hidden_states, all_self_attns] if v is not None)
 
     ### only pass the hidden_states of last seq length
     # ! you can pass only the hidden_states of last seq length for better performance
@@ -219,14 +214,15 @@ class LlamaMixtureAttention(LlamaAttention):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.LongTensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
         past_key_value: Optional[StaticCircularCache] = None,
         output_attentions: bool = False,
         use_cache: bool = False,
+        cache_position: Optional[torch.LongTensor] = None,
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.45
         **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
-
         ### begin modification ###
         assert (
             self.num_key_value_groups == 1
@@ -246,37 +242,32 @@ class LlamaMixtureAttention(LlamaAttention):
         key_states = self.k_proj(hidden_states)
         value_states = self.v_proj(hidden_states)
 
-        query_states = query_states.view(
-            bsz, q_len, self.num_heads, self.head_dim
-        ).transpose(1, 2)
-        key_states = key_states.view(
-            bsz, q_len, self.num_key_value_heads, self.head_dim
-        ).transpose(1, 2)
-        value_states = value_states.view(
-            bsz, q_len, self.num_key_value_heads, self.head_dim
-        ).transpose(1, 2)
+        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+        key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+        value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
 
-        kv_seq_len = key_states.shape[-2]
-        if past_key_value is not None:
-            kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
-        cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
-        query_states, key_states = apply_rotary_pos_emb(
-            query_states, key_states, cos, sin, position_ids
-        )
+        if position_embeddings is None:
+            logger.warning_once(
+                "The attention layers in this model are transitioning from computing the RoPE embeddings internally "
+                "through `position_ids` (2D tensor with the indexes of the tokens), to using externally computed "
+                "`position_embeddings` (Tuple of tensors, containing cos and sin). In v4.45 `position_ids` will be "
+                "removed and `position_embeddings` will be mandatory."
+            )
+            cos, sin = self.rotary_emb(value_states, position_ids)
+        else:
+            cos, sin = position_embeddings
+        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
         ### begin modification ###
+        causal_mask = attention_mask
         if attention_mask is not None:
-            if attention_mask.size() != (bsz, kv_seq_len):
-                raise ValueError(
-                    f"Attention mask should be of size {(bsz, kv_seq_len)}, but is {attention_mask.size()}"
-                )
+            causal_mask = causal_mask[:, :, :, : key_states.shape[-2]]
 
         if past_key_value is not None:
-            cache_kwargs = {"sin": sin, "cos": cos}  # Specific to RoPE models
-            key_states, value_states = past_key_value.update(
-                key_states, value_states, self.layer_idx, attention_mask, cache_kwargs
-            )
-            if q_len == 1 and kv_seq_len > 1:
+            # sin and cos are specific to RoPE models; cache_position needed for the static cache
+            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs=cache_kwargs)
+            if q_len == 1 and key_states.shape[-2] > 1:
                 # update this_attention_mask during decode
                 this_attention_mask = (
                     past_key_value.mask_cache[self.layer_idx]
@@ -302,7 +293,7 @@ class LlamaMixtureAttention(LlamaAttention):
         # Contiguous is necessary here because of the view call in the linear layers
         if (
             query_states.device.type == "cuda"
-            and attention_mask is not None
+            and causal_mask is not None
             and isinstance(key_states, torch.Tensor)
         ):
             query_states = query_states.contiguous()
@@ -347,12 +338,12 @@ class LlamaMixtureAttention(LlamaAttention):
 
         return attn_output, None, past_key_value
 
-
 def LlamaModel_set_mixture_of_attention(
     self,
     moa_config: Dict,
     permute_head: bool = False,
     moa_verbose: bool = False,
+    moa_max_new_token: int = 1024,
     last_hidden_only: bool = True,
     sparse_prefill: bool = True,
 ):
@@ -375,6 +366,7 @@ def LlamaModel_set_mixture_of_attention(
     # addtional setups
     self.moa_verbose = moa_verbose
     self.last_hidden_only = last_hidden_only
+    self.moa_max_new_token = moa_max_new_token
 
     assert sparse_prefill, "only support sparse prefill now. modify the implementation in `mixture_of_attention` if you want to use dense prefill"
 
@@ -420,6 +412,35 @@ def LlamaModel_set_mixture_of_attention(
     self.use_moa = True
     self.moa_config = moa_config
 
+
+"""
+Deprecated
+Efficient block sparse llama attention using lut
+"""
+from MoA.kernels.block_sparse_attention_prefill import sparse_attention
+
+def lut_to_single_query_kv_mask(
+    lut: torch.Tensor,
+    query_idx: int,
+    block_size: int = 64,
+):
+    if len(lut.size()) == 4:
+        # raise warning, but proceed
+        warnings.warn("The input lut has four dimensions, please make sure that lut is the same across all heads in the layer")
+        lut = lut[0, 0, :, :]
+    else:
+        lut = lut[0]
+
+    kv_length = query_idx + 1
+
+    query_block_idx = query_idx // block_size
+    query_block_lut = lut[query_block_idx]
+    seen_id = [0 for _ in range(kv_length)]
+    for i in query_block_lut:
+        for j in range(i * block_size, min((i + 1) * block_size, kv_length)):
+            seen_id[j] = 1
+
+    return seen_id
 
 """
 Deprecated
@@ -587,7 +608,6 @@ def LlamaAttention_block_sparse_lut_forward_fake_sparse_decode(
         attn_weights = None
 
     return attn_output, attn_weights, past_key_value
-
 
 def LlamaAttention_block_sparse_lut_forward_split_head(
         self,
@@ -993,6 +1013,233 @@ def LlamaModel_Streamingllm_forward(
     )
 
 
+def LlamaDecoderLayer_set_static_attention_lut(self, lut_list, lut_for_head, block_size: int, device: Optional[str] = None, permute_head=False, sparse_decode=False):
+    """
+    Set the attention layout of the decoder layer
+
+    lut: a tuple has 'layer' elements, each element has the size of [lut_num_heads, num_block, nnz]
+    lut_for_head: a tuple has 'layer' elements, each element has the size of [lut_num_heads]
+                  we use it as an indicator when combine heads
+    block_size: int
+    device: str
+    """
+
+    if isinstance(lut_list, List) is False:
+        lut_list = [lut_list]
+
+    # print(f"permute head is set to {permute_head}")
+
+    # self.self_attn.efficient_attention = sparse_attention_prefill
+    num_heads = lut_list[0].shape[0]
+    self.self_attn.efficient_attention = sparse_attention
+    if device is None:
+        device = self.self_attn.o_proj.weight.device
+        # print(device)
+    lut_list = [lut.to(device) for lut in lut_list]
+    lut_token_len = [lut.shape[1] * block_size for lut in lut_list]
+       
+    if permute_head:
+        # get a single permutation and a single cluster from lut_list
+        permutation, cluster = lut_to_permutation(lut_list, num_heads)
+        # print("The number of different rules per layer is ", len(cluster))
+        
+        # assert cluster dictionary has only two records
+        assert len(cluster) <= 2, f"to use permute head, you must have at most two patterns for the head, currently have {len(cluster)}"
+        lut_list = [permute_lut(lut, permutation, num_heads) for lut in lut_list]
+        self.self_attn.permutation = permutation
+        self.self_attn.cluster = cluster
+
+        lut0_list = [lut[cluster[0][0], :, :] for lut in lut_list]
+        lut1_list = [lut[cluster[1][0], :, :] for lut in lut_list] if len(cluster) == 2 else None
+
+        global0_list = [get_lut_global_size(lut0, block_size) for lut0 in lut0_list]
+        global1_list = [get_lut_global_size(lut1, block_size) for lut1 in lut1_list] if len(cluster) == 2 else [None for _ in lut0_list]
+
+        self.self_attn.global_size_dict = {i: (global0, global1) for i, global0, global1 in zip(lut_token_len, global0_list, global1_list)}
+
+        band_list  = [get_lut_band_size(lut0, block_size) for lut0 in lut0_list]
+        band1_list = [get_lut_band_size(lut1, block_size) for lut1 in lut1_list] if len(cluster) == 2 else [None for _ in lut0_list]
+
+        self.self_attn.band_size_dict = {i: (band, band1) for i, band, band1 in zip(lut_token_len, band_list, band1_list)}
+
+    lut_dict = {i: lut for i, lut in zip(lut_token_len, lut_list)}
+    self.self_attn.lut_dict = lut_dict
+
+    if not permute_head and sparse_decode:
+        layout_list = [lut2layout_single_layer(lut.to('cpu')).to('cuda') for lut in lut_list]
+        self.self_attn.layout_dict = {i: layout for i, layout in zip(lut_token_len, layout_list)}
+        print("successfully convert lut to layout")
+
+    self.self_attn.lut_for_head = lut_for_head
+    self.self_attn.block_size = block_size
+
+    if permute_head:
+        permute_attention_projection(self.self_attn.q_proj, permutation, num_heads)
+        permute_attention_projection(self.self_attn.k_proj, permutation, num_heads)
+        permute_attention_projection(self.self_attn.v_proj, permutation, num_heads)
+        permute_output_projection(self.self_attn.o_proj, permutation, num_heads)
+
+
+def LlamaModel_use_block_sparse_attention_lut(self, permute_head=False, sparse_decode=False):
+    """
+    Overall interface
+    Set the model instance to use efficient attention instead of llama attention
+    """
+
+    # update functions in LlamaModel
+    if permute_head:
+        self.set_mixture_of_attention = MethodType(LlamaModel_set_mixture_of_attention, self)
+        self.forward = MethodType(LlamaModel_MixtureAttention_forward, self)
+
+    # update functions in LlamaAttention
+    for layer in self.layers:
+        if permute_head:
+            layer.self_attn.forward = MethodType(LlamaAttention_block_sparse_lut_forward_split_head, layer.self_attn)
+        else:
+            layer.self_attn.forward = MethodType(LlamaAttention_block_sparse_lut_forward_fake_sparse_decode, layer.self_attn)
+            layer.self_attn.sparse_decode = sparse_decode
+
+        layer.set_static_attention_lut = MethodType(LlamaDecoderLayer_set_static_attention_lut, layer)
+
+"""
+streamingLLM implementation
+"""
+
+def LlamaModel_Streamingllm_forward(
+    self,
+    input_ids: torch.LongTensor = None,
+    attention_mask: Optional[torch.Tensor] = None,
+    position_ids: Optional[torch.LongTensor] = None,
+    past_key_values: Optional[List[torch.FloatTensor]] = None,
+    inputs_embeds: Optional[torch.FloatTensor] = None,
+    use_cache: Optional[bool] = None,
+    output_attentions: Optional[bool] = None,
+    output_hidden_states: Optional[bool] = None,
+    return_dict: Optional[bool] = None,
+) -> Union[Tuple, BaseModelOutputWithPast]:
+    output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+    output_hidden_states = (
+        output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+    )
+    use_cache = use_cache if use_cache is not None else self.config.use_cache
+
+    return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+    # retrieve input_ids and inputs_embeds
+    if input_ids is not None and inputs_embeds is not None:
+        raise ValueError("You cannot specify both input_ids and inputs_embeds at the same time")
+    elif input_ids is not None:
+        batch_size, seq_length = input_ids.shape[:2]
+    elif inputs_embeds is not None:
+        batch_size, seq_length = inputs_embeds.shape[:2]
+    else:
+        raise ValueError("You have to specify either input_ids or inputs_embeds")
+
+    if self.gradient_checkpointing and self.training:
+        if use_cache:
+            logger.warning_once(
+                "`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`..."
+            )
+            use_cache = False
+
+    past_key_values_length = 0
+    if use_cache:
+        # use_legacy_cache = not isinstance(past_key_values, Cache)
+        # if use_legacy_cache:
+        if past_key_values is None:
+            past_key_values = StreamingllmDynamicCache()
+        past_key_values_length = past_key_values.get_usable_length(seq_length)
+
+    if position_ids is None:
+        device = input_ids.device if input_ids is not None else inputs_embeds.device
+        position_ids = torch.arange(
+            past_key_values_length, seq_length + past_key_values_length, dtype=torch.long, device=device
+        )
+        position_ids = position_ids.unsqueeze(0)
+
+    if inputs_embeds is None:
+        inputs_embeds = self.embed_tokens(input_ids)
+
+    if self._use_flash_attention_2:
+        # 2d mask is passed through the layers
+        attention_mask = attention_mask if (attention_mask is not None and 0 in attention_mask) else None
+    elif self._use_sdpa and not output_attentions:
+        # output_attentions=True can not be supported when using SDPA, and we fall back on
+        # the manual implementation that requires a 4D causal mask in all cases.
+        attention_mask = _prepare_4d_causal_attention_mask_for_sdpa(
+            attention_mask,
+            (batch_size, seq_length),
+            inputs_embeds,
+            past_key_values_length,
+        )
+    else:
+        # 4d mask is passed through the layers
+        attention_mask = _prepare_4d_causal_attention_mask(
+            attention_mask, (batch_size, seq_length), inputs_embeds, past_key_values_length
+        )
+
+    # embed positions
+    hidden_states = inputs_embeds
+
+    # decoder layers
+    all_hidden_states = () if output_hidden_states else None
+    all_self_attns = () if output_attentions else None
+    next_decoder_cache = None
+
+    for decoder_layer in self.layers:
+        if output_hidden_states:
+            all_hidden_states += (hidden_states,)
+
+        if self.gradient_checkpointing and self.training:
+            layer_outputs = self._gradient_checkpointing_func(
+                decoder_layer.__call__,
+                hidden_states,
+                attention_mask,
+                position_ids,
+                past_key_values,
+                output_attentions,
+                use_cache,
+            )
+        else:
+            layer_outputs = decoder_layer(
+                hidden_states,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_value=past_key_values,
+                output_attentions=output_attentions,
+                use_cache=use_cache,
+            )
+
+        hidden_states = layer_outputs[0]
+
+        if use_cache:
+            next_decoder_cache = layer_outputs[2 if output_attentions else 1]
+
+        if output_attentions:
+            all_self_attns += (layer_outputs[1],)
+
+    hidden_states = self.norm(hidden_states)
+
+    # add hidden states from the last decoder layer
+    if output_hidden_states:
+        all_hidden_states += (hidden_states,)
+
+    next_cache = None
+    ## changes ###
+    if use_cache:
+        next_cache = next_decoder_cache
+    ### end ###
+    if not return_dict:
+        return tuple(v for v in [hidden_states, next_cache, all_hidden_states, all_self_attns] if v is not None)
+    ### !you can just past the last hidden states in generation mode
+    return BaseModelOutputWithPast(
+        last_hidden_state=hidden_states[:, -1:, :],
+        past_key_values=next_cache,
+        hidden_states=all_hidden_states,
+        attentions=all_self_attns,
+    )
+
+
 def LlamaAttention_streamingllm_forward(
         self,
         hidden_states: torch.Tensor,
@@ -1096,7 +1343,7 @@ def LlamaAttention_streamingllm_forward(
             if key_states.shape[2] > band_size + global_size:
                 concatenated_key_states = torch.cat([key_states[:, :, :global_size, :], key_states[:, :, -band_size:, :]], dim=2)
                 concatenated_value_states = torch.cat([value_states[:, :, :global_size, :], value_states[:, :, -band_size:, :]], dim=2)
-                past_key_value.update(concatenated_key_states, concatenated_value_states, self.layer_idx, cache_kwargs, update_seen_tokens=key_states.shape[2])
+                past_key_value.update(concatenated_key_states, concatenated_value_states, self.layer_idx, cache_kwargs, update_cache_position=key_states.shape[2])
             else:
                 past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
 

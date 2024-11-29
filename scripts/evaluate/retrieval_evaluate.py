@@ -54,7 +54,7 @@ def process_prompt(input, model, tokenizer, test_case: Dict, output_file: Option
         **input, 
         max_new_tokens=100, 
         use_cache=use_cache,
-        eos_token_id=stop_token_ids,
+        eos_token_id=stop_token_ids if stop_token_ids else tokenizer.eos_token_id,
     )[0]
     output = output[prompt_length:]
     output = tokenizer.batch_decode([output], skip_special_tokens=True)[0]
@@ -218,6 +218,9 @@ if __name__ == "__main__":
         model = update_model_function(model, args.model_name)
         model.model.set_mixture_of_attention(moa_config, permute_head=True)
 
+    if model.generation_config.pad_token_id is None:
+        model.generation_config.pad_token_id = tokenizer.pad_token_id
+
     """
     evaluate
     """
@@ -225,12 +228,12 @@ if __name__ == "__main__":
     model_name = args.model_name
 
     # load dataset
-    dataset_path = "nics-efc/MoA_Long_Retrieval"
+    remote_dataset_path = "nics-efc/MoA_Long_Retrieval"
 
     if args.dataset_path is not None:
         dataset = load_from_disk(args.dataset_path)
     else:
-        dataset = load_dataset(dataset_path, split="test")
+        dataset = load_dataset(remote_dataset_path, split="test")
     
 
     # iter through dataset
