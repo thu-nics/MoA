@@ -824,6 +824,15 @@ class StaticCircularCache(Cache):
     ) -> Tensor:
         """
         Convert the starting index and valid length of each head to the head index.
+        Args:
+            head_start_index (Tensor): A tensor containing the starting index for each head.
+                                       Shape: [num_heads, ...]
+            head_valid_length (Tensor): A tensor containing the valid length for each head.
+                                        Shape: [num_heads, ...]
+
+        Returns:
+            Tensor: A tensor containing the head index.
+                    Shape: [2, ...] where the first element is the starting index and the second element is the ending index.
         """
         assert (head_start_index == head_start_index[0]).all().item()
         assert (head_valid_length == head_valid_length[0]).all().item()
@@ -1193,7 +1202,7 @@ def moa_config_to_cache_config(
         sink_size (int, optional):
             The sink size. Defaults to 64.
         minimum_cache_size (int, optional):
-            The minimum cache size. Defaults to 128.
+            The minimum cache size. Defaults to 128. All cache size would be larger than minimum cache size.
         split_size (int, optional):
             The cache size of each head should be a multiple of this number. Defaults to 64.
         verbose (bool, optional):
@@ -1217,10 +1226,13 @@ def moa_config_to_cache_config(
                 + (seq_len + max_new_token) * betas[layer_id][head_id]
             )
             cache_size_this_head = min(
+                cache_size_this_head, seq_len + max_new_token
+            )  # ensure cache size < seq_lengnth + max_new_token
+            cache_size_this_head = (
                 math.ceil(max(cache_size_this_head, minimum_cache_size) / split_size)
-                * split_size,
-                seq_len + max_new_token,
-            )
+                * split_size
+            ) # ensure that cache size > minimum cache size; in extremely small input lengths, when minimum cache size > seq_len + max_new_token, cache size will be minimum cache size
+
             cache_size_this_layer.append(cache_size_this_head)
             static_size_this_layer.append(min(cache_size_this_head, sink_size))
         cache_size_dict.append(cache_size_this_layer)

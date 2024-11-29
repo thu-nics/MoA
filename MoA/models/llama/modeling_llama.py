@@ -97,7 +97,7 @@ def LlamaModel_MixtureAttention_forward(
             cache_config = moa_config_to_cache_config(
                 self.moa_config,
                 seq_len=seq_length,
-                max_new_token=1024,
+                max_new_token=self.moa_max_new_token,
                 sink_size=64,
                 minimum_cache_size=128,
                 split_size=64,
@@ -109,6 +109,7 @@ def LlamaModel_MixtureAttention_forward(
                 head_dim=head_dim,
                 device=self.device,
                 dtype=self.dtype,
+                update_cache_content=True
             )
     ### end of perpare cache ###
 
@@ -336,6 +337,7 @@ def LlamaModel_set_mixture_of_attention(
     moa_config: Dict,
     permute_head: bool = False,
     moa_verbose: bool = False,
+    moa_max_new_token: int = 1024,
     last_hidden_only: bool = True,
     sparse_prefill: bool = True,
 ):
@@ -358,6 +360,7 @@ def LlamaModel_set_mixture_of_attention(
     # addtional setups
     self.moa_verbose = moa_verbose
     self.last_hidden_only = last_hidden_only
+    self.moa_max_new_token = moa_max_new_token
 
     assert sparse_prefill, "only support sparse prefill now. modify the implementation in `mixture_of_attention` if you want to use dense prefill"
 
