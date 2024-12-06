@@ -90,27 +90,26 @@ def LlamaModel_MixtureAttention_forward(
         inputs_embeds = self.embed_tokens(input_ids)
 
     ### prepare cache ###
-    if use_cache:
-        if not isinstance(past_key_values, StaticCircularCache):
-            # initialize the cache
-            head_dim = self.config.hidden_size // self.config.num_attention_heads
-            cache_config = moa_config_to_cache_config(
-                self.moa_config,
-                seq_len=seq_length,
-                max_new_token=self.moa_max_new_token,
-                sink_size=64,
-                minimum_cache_size=128,
-                split_size=64,
-                verbose=self.moa_verbose if hasattr(self, "moa_verbose") else False, # set to True if you want to see the cache sizes
-            )
-            past_key_values = StaticCircularCache(
-                **cache_config,
-                batch_size=batch_size,
-                head_dim=head_dim,
-                device=self.device,
-                dtype=self.dtype,
-                update_cache_content=True
-            )
+    if not isinstance(past_key_values, StaticCircularCache):
+        # initialize the cache
+        head_dim = self.config.hidden_size // self.config.num_attention_heads
+        cache_config = moa_config_to_cache_config(
+            self.moa_config,
+            seq_len=seq_length,
+            max_new_token=self.moa_max_new_token,
+            sink_size=64,
+            minimum_cache_size=128,
+            split_size=64,
+            verbose=self.moa_verbose if hasattr(self, "moa_verbose") else False, # set to True if you want to see the cache sizes
+        )
+        past_key_values = StaticCircularCache(
+            **cache_config,
+            batch_size=batch_size,
+            head_dim=head_dim,
+            device=self.device,
+            dtype=self.dtype,
+            update_cache_content=True
+        )
     ### end of perpare cache ###
 
     if cache_position is None:
