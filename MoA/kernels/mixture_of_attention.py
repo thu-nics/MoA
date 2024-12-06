@@ -23,13 +23,14 @@ try:
     from flashinfer import moa_prefill, moa_decode
     CUDA_KERNEL_AVAILABLE = True
     # kernel settings
-    BLOCK_M = 64
-    BLOCK_N = 64
 except ImportError:
     print("Module 'flashinfer' is not available. Efficient sparse decoding is not supported. Switching to the Triton implementation")
     if torch.cuda.device_count() > 1:
         raise NotImplementedError("Please install the MoA CUDA kernel for inference on multiple GPUs")
     CUDA_KERNEL_AVAILABLE = False
+
+BLOCK_M = 64
+BLOCK_N = 64
 
 import warnings
 
