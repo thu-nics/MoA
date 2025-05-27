@@ -19,12 +19,11 @@ MoA achieves a 1.2-1.4x GPU memory reduction, boosting decode throughput by 6.6â
 
 If you find this repository or paper useful, you can cite
 ```
-@misc{fu2024moa,
-      title={MoA: Mixture of Sparse Attention for Automatic Large Language Model Compression}, 
-      author={Tianyu Fu and Haofeng Huang and Xuefei Ning and Genghan Zhang and Boju Chen and Tianqi Wu and Hongyi Wang and Zixiao Huang and Shiyao Li and Shengen Yan and Guohao Dai and Huazhong Yang and Yu Wang},
-      year={2024},
-      eprint={2406.14909},
-      archivePrefix={arXiv}
+@article{fu2024moa,
+  title={Moa: Mixture of sparse attention for automatic large language model compression},
+  author={Fu, Tianyu and Huang, Haofeng and Ning, Xuefei and Zhang, Genghan and Chen, Boju and Wu, Tianqi and Wang, Hongyi and Huang, Zixiao and Li, Shiyao and Yan, Shengen and others},
+  journal={arXiv preprint arXiv:2406.14909},
+  year={2024}
 }
 ```
 
