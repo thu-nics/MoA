@@ -41,6 +41,7 @@ conda activate moa
 
 pip install -r requirements.txt
 pip install -e .
+pip install flash-attn==2.5.8 --no-build-isolation
 ```
 
 Then, install the MoA kernel by following the instructions in the [MoA Kernel repository](https://github.com/thu-nics/MoA_Kernel).

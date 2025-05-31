@@ -3,17 +3,28 @@ import socket
 from datetime import datetime
 import cProfile
 import os
+import time
+import threading
 
 import torch
 import random
 
 import argparse
 from typing import List, Optional, Tuple, Union
+from tqdm import tqdm
 from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig
 
 import json
 
 from MoA.models.interface import update_model_function
+
+try:
+    import pynvml
+    PYNVML_AVAILABLE = True
+    pynvml.nvmlInit()
+except (ImportError, pynvml.NVMLError) as err:
+    print(f"Warning: PYNVML not available: {err}. Power monitoring will be disabled.")
+    PYNVML_AVAILABLE = False
 
 # !!! remember to calculate only the last logit for lm_head when doing efficiency test.
 # !!! to do this, refer to the return value of LlamaModel_block_sparse_lut_forward function in MoA/models/llama/modeling_llama.py. The same can be done to LlamaModel.forward in the transformers library.
@@ -51,6 +62,8 @@ parser.add_argument('--cuda_cache', action="store_true")
 parser.add_argument('--record_memory', action='store_true')
 parser.add_argument('--memory_file_name', type=str, default=None)
 parser.add_argument('--test_mode', type=str, choices=['decode', 'prefill', 'whole'], default='whole')
+parser.add_argument('--monitor_power', action='store_true', help='Monitor GPU power usage during inference')
+parser.add_argument('--power_sample_interval', type=float, default=0.01, help='Power sampling interval in seconds')
 
 args = parser.parse_args()
 
@@ -60,7 +73,7 @@ def fake_decode(model, tokenizer, prefill_output, max_len):
     pred_token_idx = prefill_output.logits[:, -1, :].argmax(dim=-1).unsqueeze(1)
     # result_idx.append(pred_token_idx.item())
 
-    for _ in range(max_len - 1):
+    for _ in tqdm(range(max_len - 1), desc="Decoding"):
         outputs = model(input_ids=pred_token_idx, past_key_values=past_key_values, use_cache=True)
         past_key_values = outputs.past_key_values
         # random sample a pred token idx from the logits shape
@@ -119,6 +132,104 @@ def export_memory_snapshot() -> None:
         logger.error(f"Failed to capture memory snapshot {e}")
         return
 
+class PowerMonitor:
+    def __init__(self, device_id=0, sample_interval=0.01):
+        self.device_id = device_id
+        self.sample_interval = sample_interval
+        self.power_samples = []
+        self.timestamps = []
+        self.monitoring = False
+        self.monitor_thread = None
+        
+        if PYNVML_AVAILABLE:
+            try:
+                self.handle = pynvml.nvmlDeviceGetHandleByIndex(device_id)
+                # Test if we can get power reading
+                pynvml.nvmlDeviceGetPowerUsage(self.handle)
+                self.power_available = True
+            except pynvml.NVMLError as err:
+                print(f"Warning: Cannot get power readings for GPU {device_id}: {err}")
+                self.power_available = False
+        else:
+            self.power_available = False
+    
+    def _monitor_power(self):
+        """Background thread function to monitor power usage"""
+        start_time = time.time()
+        while self.monitoring:
+            try:
+                if self.power_available:
+                    power_usage = pynvml.nvmlDeviceGetPowerUsage(self.handle)  # Power in milliwatts
+                    current_time = time.time()
+                    self.power_samples.append(power_usage / 1000.0)  # Convert to watts
+                    self.timestamps.append(current_time - start_time)
+                time.sleep(self.sample_interval)
+            except Exception as e:
+                print(f"Error monitoring power: {e}")
+                break
+    
+    def start_monitoring(self):
+        """Start power monitoring in a background thread"""
+        if not self.power_available:
+            return
+        
+        self.power_samples = []
+        self.timestamps = []
+        self.monitoring = True
+        self.monitor_thread = threading.Thread(target=self._monitor_power)
+        self.monitor_thread.start()
+    
+    def stop_monitoring(self):
+        """Stop power monitoring and return statistics"""
+        if not self.power_available:
+            return None
+        
+        self.monitoring = False
+        if self.monitor_thread:
+            self.monitor_thread.join()
+        
+        if not self.power_samples:
+            return None
+        
+        total_duration = self.timestamps[-1] - self.timestamps[0] if len(self.timestamps) > 1 else 0
+        avg_power = sum(self.power_samples) / len(self.power_samples)
+        max_power = max(self.power_samples)
+        min_power = min(self.power_samples)
+        
+        # Calculate energy consumption (power * time)
+        energy_joules = 0
+        for i in range(1, len(self.power_samples)):
+            time_diff = self.timestamps[i] - self.timestamps[i-1]
+            avg_power_interval = (self.power_samples[i] + self.power_samples[i-1]) / 2
+            energy_joules += avg_power_interval * time_diff
+        
+        return {
+            'avg_power_watts': avg_power,
+            'max_power_watts': max_power,
+            'min_power_watts': min_power,
+            'total_energy_joules': energy_joules,
+            'duration_seconds': total_duration,
+            'num_samples': len(self.power_samples),
+            'power_samples': self.power_samples,
+            'timestamps': self.timestamps
+        }
+    
+    def get_power_info(self):
+        """Get current GPU power information"""
+        if not self.power_available:
+            return None
+        
+        try:
+            power_usage = pynvml.nvmlDeviceGetPowerUsage(self.handle) / 1000.0  # Convert to watts
+            power_limit = pynvml.nvmlDeviceGetEnforcedPowerLimit(self.handle) / 1000.0  # Convert to watts
+            
+            return {
+                'current_power_watts': power_usage,
+                'power_limit_watts': power_limit
+            }
+        except Exception as e:
+            print(f"Error getting power info: {e}")
+            return None
 
 def run_model(num_iters=5, device="cuda:0"):
    
@@ -144,6 +255,20 @@ def run_model(num_iters=5, device="cuda:0"):
         # Add mixture of sparse attention capability to the model
         model = update_model_function(model, args.model_name)
         model.model.set_mixture_of_attention(moa_config, permute_head=True, moa_verbose=False)
+
+    # Initialize power monitor
+    power_monitor = None
+    if args.monitor_power:
+        # Get GPU device ID (assume using cuda:0)
+        gpu_id = 0 if device == "cuda:0" else int(device.split(':')[1])
+        power_monitor = PowerMonitor(device_id=gpu_id, sample_interval=args.power_sample_interval)
+        
+        # Print initial power info
+        power_info = power_monitor.get_power_info()
+        if power_info:
+            print(f"GPU Power Info:")
+            print(f"  Current Power: {power_info['current_power_watts']:.2f} W")
+            print(f"  Power Limit: {power_info['power_limit_watts']:.2f} W")
 
     test_file = 'data/70_lines.jsonl'
     with open(test_file, 'r') as f:
@@ -176,7 +301,7 @@ def run_model(num_iters=5, device="cuda:0"):
         # generate the past key value states
         generation_prefill_output_list = []
         with torch.inference_mode():
-            for _ in range(num_iters):
+            for _ in tqdm(range(num_iters), desc="Decoding"):
                 generation_prefill_output_list.append(model(input.input_ids.to(device), use_cache=True, output_hidden_states=False))
 
     print("Start testing")
@@ -198,38 +323,82 @@ def run_model(num_iters=5, device="cuda:0"):
     if args.record_memory:
         start_record_memory_history()
 
+    # Start power monitoring
+    prefill_power_stats = None
+    decode_power_stats = None
+    
     if args.test_mode == "prefill":
+        if power_monitor:
+            power_monitor.start_monitoring()
+        
         with torch.inference_mode():
             for _ in range(num_iters):
                 output = model(input.input_ids.to(device), use_cache=True, output_hidden_states=False)
                 print(len(output))
                 output = None
+        
+        if power_monitor:
+            prefill_power_stats = power_monitor.stop_monitoring()
 
     if args.test_mode == 'decode':
+        if power_monitor:
+            power_monitor.start_monitoring()
+        
         with torch.inference_mode():
             for i in range(num_iters):
                 result_idx = fake_decode(model, tokenizer, generation_prefill_output_list[i], args.decode_len)
                 result_idx = None
+        
+        if power_monitor:
+            decode_power_stats = power_monitor.stop_monitoring()
 
     if args.test_mode == 'whole':
         with torch.inference_mode():
             for i in range(num_iters):
+                # Prefill phase with separate power monitoring
+                if power_monitor:
+                    power_monitor.start_monitoring()
+                
                 outputs = model(input.input_ids.to(device), use_cache=True, output_hidden_states=False)
-                # past_key_values = outputs.past_key_values
-                # pred_token_idx = outputs.logits[:, -1, :].argmax(dim=-1).unsqueeze(1)
-                # outputs = None
-
-                # for _ in range(args.decode_len - 1):
-                #     outputs = model(input_ids=pred_token_idx, past_key_values=past_key_values, use_cache=True)
-                #     past_key_values = outputs.past_key_values
-                #     pred_token_idx = outputs.logits[:, -1, :].argmax(dim=-1).unsqueeze(1)
+                
+                if power_monitor:
+                    current_prefill_stats = power_monitor.stop_monitoring()
+                    if prefill_power_stats is None:
+                        prefill_power_stats = current_prefill_stats
+                    else:
+                        # Accumulate stats across iterations
+                        if current_prefill_stats:
+                            prefill_power_stats['avg_power_watts'] = (prefill_power_stats['avg_power_watts'] * prefill_power_stats['num_samples'] + 
+                                                                    current_prefill_stats['avg_power_watts'] * current_prefill_stats['num_samples']) / (prefill_power_stats['num_samples'] + current_prefill_stats['num_samples'])
+                            prefill_power_stats['max_power_watts'] = max(prefill_power_stats['max_power_watts'], current_prefill_stats['max_power_watts'])
+                            prefill_power_stats['min_power_watts'] = min(prefill_power_stats['min_power_watts'], current_prefill_stats['min_power_watts'])
+                            prefill_power_stats['total_energy_joules'] += current_prefill_stats['total_energy_joules']
+                            prefill_power_stats['duration_seconds'] += current_prefill_stats['duration_seconds']
+                            prefill_power_stats['num_samples'] += current_prefill_stats['num_samples']
+                
+                # Decode phase with separate power monitoring
+                if power_monitor:
+                    power_monitor.start_monitoring()
+                
                 fake_decode(model, tokenizer, outputs, args.decode_len)
-                outputs = None
-
+                
+                if power_monitor:
+                    current_decode_stats = power_monitor.stop_monitoring()
+                    if decode_power_stats is None:
+                        decode_power_stats = current_decode_stats
+                    else:
+                        # Accumulate stats across iterations
+                        if current_decode_stats:
+                            decode_power_stats['avg_power_watts'] = (decode_power_stats['avg_power_watts'] * decode_power_stats['num_samples'] + 
+                                                                   current_decode_stats['avg_power_watts'] * current_decode_stats['num_samples']) / (decode_power_stats['num_samples'] + current_decode_stats['num_samples'])
+                            decode_power_stats['max_power_watts'] = max(decode_power_stats['max_power_watts'], current_decode_stats['max_power_watts'])
+                            decode_power_stats['min_power_watts'] = min(decode_power_stats['min_power_watts'], current_decode_stats['min_power_watts'])
+                            decode_power_stats['total_energy_joules'] += current_decode_stats['total_energy_joules']
+                            decode_power_stats['duration_seconds'] += current_decode_stats['duration_seconds']
+                            decode_power_stats['num_samples'] += current_decode_stats['num_samples']
                 result_idx = None
 
                 print(f"iter {i} done")
-
 
     if args.profiler:
         profiler.disable()
@@ -254,6 +423,100 @@ def run_model(num_iters=5, device="cuda:0"):
     if args.cuda_cache:
         max_memory = torch.cuda.max_memory_allocated() // 2**20
         print(f"Max memory: {max_memory} MB")
+
+    # Print power monitoring results
+    if args.monitor_power and power_monitor:
+        print("\n" + "="*50)
+        print("GPU POWER USAGE ANALYSIS")
+        print("="*50)
+        
+        if args.test_mode == "prefill" and prefill_power_stats:
+            print(f"PREFILL PHASE POWER STATS:")
+            print(f"  Duration: {prefill_power_stats['duration_seconds']:.3f} s")
+            print(f"  Average Power: {prefill_power_stats['avg_power_watts']:.2f} W")
+            print(f"  Peak Power: {prefill_power_stats['max_power_watts']:.2f} W")
+            print(f"  Min Power: {prefill_power_stats['min_power_watts']:.2f} W")
+            print(f"  Total Energy: {prefill_power_stats['total_energy_joules']:.2f} J")
+            print(f"  Samples: {prefill_power_stats['num_samples']}")
+            
+            # Calculate per-iteration and per-token metrics
+            energy_per_iter = prefill_power_stats['total_energy_joules'] / num_iters
+            tokens_per_iter = args.batch_size * input.input_ids.shape[1]  # Total tokens across all batch items
+            energy_per_token = energy_per_iter / tokens_per_iter  # Energy per individual token
+            print(f"  Energy per iteration: {energy_per_iter:.3f} J")
+            print(f"  Energy per token (prefill): {energy_per_token:.3f} J")
+            
+        elif args.test_mode == "decode" and decode_power_stats:
+            print(f"DECODE PHASE POWER STATS:")
+            print(f"  Duration: {decode_power_stats['duration_seconds']:.3f} s")
+            print(f"  Average Power: {decode_power_stats['avg_power_watts']:.2f} W")
+            print(f"  Peak Power: {decode_power_stats['max_power_watts']:.2f} W")
+            print(f"  Min Power: {decode_power_stats['min_power_watts']:.2f} W")
+            print(f"  Total Energy: {decode_power_stats['total_energy_joules']:.2f} J")
+            print(f"  Samples: {decode_power_stats['num_samples']}")
+            
+            # Calculate per-iteration and per-token metrics
+            energy_per_iter = decode_power_stats['total_energy_joules'] / num_iters
+            tokens_per_iter = args.batch_size * args.decode_len  # Total tokens across all batch items
+            energy_per_token = energy_per_iter / tokens_per_iter  # Energy per individual token
+            print(f"  Energy per iteration: {energy_per_iter:.3f} J")
+            print(f"  Energy per token (decode): {energy_per_token:.3f} J")
+            
+        elif args.test_mode == "whole":
+            # Display separate prefill and decode stats
+            if prefill_power_stats:
+                print(f"PREFILL PHASE POWER STATS:")
+                print(f"  Duration: {prefill_power_stats['duration_seconds']:.3f} s")
+                print(f"  Average Power: {prefill_power_stats['avg_power_watts']:.2f} W")
+                print(f"  Peak Power: {prefill_power_stats['max_power_watts']:.2f} W")
+                print(f"  Min Power: {prefill_power_stats['min_power_watts']:.2f} W")
+                print(f"  Total Energy: {prefill_power_stats['total_energy_joules']:.2f} J")
+                print(f"  Samples: {prefill_power_stats['num_samples']}")
+                
+                # Calculate per-iteration and per-token metrics for prefill
+                prefill_energy_per_iter = prefill_power_stats['total_energy_joules'] / num_iters
+                prefill_tokens_per_iter = args.batch_size * input.input_ids.shape[1]  # Total tokens across all batch items
+                prefill_energy_per_token = prefill_energy_per_iter / prefill_tokens_per_iter  # Energy per individual token
+                print(f"  Energy per iteration: {prefill_energy_per_iter:.3f} J")
+                print(f"  Energy per token (prefill): {prefill_energy_per_token:.3f} J")
+                print()
+            
+            if decode_power_stats:
+                print(f"DECODE PHASE POWER STATS:")
+                print(f"  Duration: {decode_power_stats['duration_seconds']:.3f} s")
+                print(f"  Average Power: {decode_power_stats['avg_power_watts']:.2f} W")
+                print(f"  Peak Power: {decode_power_stats['max_power_watts']:.2f} W")
+                print(f"  Min Power: {decode_power_stats['min_power_watts']:.2f} W")
+                print(f"  Total Energy: {decode_power_stats['total_energy_joules']:.2f} J")
+                print(f"  Samples: {decode_power_stats['num_samples']}")
+                
+                # Calculate per-iteration and per-token metrics for decode
+                decode_energy_per_iter = decode_power_stats['total_energy_joules'] / num_iters
+                decode_tokens_per_iter = args.batch_size * args.decode_len  # Total tokens across all batch items
+                decode_energy_per_token = decode_energy_per_iter / decode_tokens_per_iter  # Energy per individual token
+                print(f"  Energy per iteration: {decode_energy_per_iter:.3f} J")
+                print(f"  Energy per token (decode): {decode_energy_per_token:.3f} J")
+                print()
+            
+            # Display combined statistics
+            if prefill_power_stats and decode_power_stats:
+                total_energy = prefill_power_stats['total_energy_joules'] + decode_power_stats['total_energy_joules']
+                total_duration = prefill_power_stats['duration_seconds'] + decode_power_stats['duration_seconds']
+                avg_combined_power = total_energy / total_duration if total_duration > 0 else 0
+                
+                print(f"COMBINED SUMMARY:")
+                print(f"  Total Duration: {total_duration:.3f} s")
+                print(f"  Total Energy: {total_energy:.2f} J")
+                print(f"  Average Combined Power: {avg_combined_power:.2f} W")
+                print(f"  Energy per iteration (total): {total_energy / num_iters:.3f} J")
+                
+                # Combined energy per token calculation - accounts for both prefill and decode tokens
+                total_tokens_per_iter = prefill_tokens_per_iter + decode_tokens_per_iter  # Total tokens across all batch items for both phases
+                combined_energy_per_token = (total_energy / num_iters) / total_tokens_per_iter  # Energy per individual token (combined)
+                print(f"  Energy per token (combined): {combined_energy_per_token:.3f} J")
+                print(f"  Prefill vs Decode Energy Ratio: {prefill_power_stats['total_energy_joules'] / decode_power_stats['total_energy_joules']:.2f}:1")
+        
+        print("="*50)
 
     if args.record_memory:
         # Create the memory snapshot file

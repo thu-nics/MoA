@@ -37,8 +37,16 @@ import warnings
 """
 used by FlashAttention2
 """
-from flash_attn import flash_attn_func, flash_attn_varlen_func
-from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input  # noqa
+try:
+    from flash_attn import flash_attn_func, flash_attn_varlen_func
+    from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input  # noqa
+except ImportError:
+    print("Module 'flash_attn' is not available. Install it to use flash attention 2")
+    flash_attn_func = None
+    flash_attn_varlen_func = None
+    index_first_axis = None
+    pad_input = None
+    unpad_input = None
 
 
 def _flash_attention_forward(
