@@ -1,5 +1,8 @@
 # MoA: Mixture of Sparse Attention for Automatic Large Language Model Compression
-**[[arXiv](https://arxiv.org/abs/2406.14909)]** **[[project page](https://thu-nics.github.io/MoA_project_page/)]**
+<p align="center">
+🌐 <a href="https://thu-nics.github.io/MoA_project_page/"><b>Project Page</b></a>&nbsp&nbsp | &nbsp&nbsp📑 <a href="https://arxiv.org/abs/2406.14909"><b>arXiv</b></a>
+</p>
+
 <table width="100%">
 <tr>
   <!-- Column for the image and text -->
