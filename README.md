@@ -2,23 +2,13 @@
 
   <img src="resource/logo.png" alt="MoA Logo" width="100"/>
 
-  
-
-  <h1>MoA</h1>
-
-  <h3>Mixture of Sparse Attention for Automatic Large Language Model Compression</h3>
-
-
+  <h1>Mixture of Attention Spans (MoA)</h1>
+  <h3>Optimizing LLM Inference Efficiency with Heterogeneous Sliding-Window Lengths</h3>
 
   <p>
-
     <a href="https://thu-nics.github.io/MoA_project_page/">🌐 <b>Project Page</b></a> •
-
     <a href="https://arxiv.org/abs/2406.14909">📑 <b>Paper</b></a>
-
   </p>
-
-
 
 </div>
 
@@ -39,17 +29,18 @@
 
 MoA achieves a 1.2-1.4x GPU memory reduction, boosting decode throughput by 6.6−8.2x and 1.7−1.9x compared to FlashAttention2 and vLLM, with minimal impact on performance.
 
-If you find this repository or paper useful, you can cite
+Feel free to star the repo or cite the paper if you find it interesting.
 ```
-@article{fu2024moa,
-  title={Moa: Mixture of sparse attention for automatic large language model compression},
+@inproceedings{fu2025moa,
+  title={Mixture of Attention Spans: Optimizing LLM Inference Efficiency with Heterogeneous Sliding-Window Lengths},
   author={Fu, Tianyu and Huang, Haofeng and Ning, Xuefei and Zhang, Genghan and Chen, Boju and Wu, Tianqi and Wang, Hongyi and Huang, Zixiao and Li, Shiyao and Yan, Shengen and others},
-  journal={arXiv preprint arXiv:2406.14909},
-  year={2024}
+  booktitle={Second Conference on Language Modeling}
 }
 ```
 
 ## News
+
+- [2025/7] MoA is accepted by [CoLM'25](https://openreview.net/forum?id=n3rZJrWPLE#discussion).
 
 - [2024/10] MoA kernel is now available in [CUDA](https://github.com/thu-nics/MoA_Kernel), achieving faster inference speed.
 
