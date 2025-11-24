@@ -1,5 +1,27 @@
-# MoA: Mixture of Sparse Attention for Automatic Large Language Model Compression
-**[[arXiv](https://arxiv.org/abs/2406.14909)]** **[[project page](https://thu-nics.github.io/MoA_project_page/)]**
+<div align="center">
+
+  <img src="resource/logo.png" alt="MoA Logo" width="100"/>
+
+  
+
+  <h1>MoA</h1>
+
+  <h3>Mixture of Sparse Attention for Automatic Large Language Model Compression</h3>
+
+
+
+  <p>
+
+    <a href="https://thu-nics.github.io/MoA_project_page/">🌐 <b>Project Page</b></a> •
+
+    <a href="https://arxiv.org/abs/2406.14909">📑 <b>Paper</b></a>
+
+  </p>
+
+
+
+</div>
+
 <table width="100%">
 <tr>
   <!-- Column for the image and text -->
@@ -41,6 +63,7 @@ conda activate moa
 
 pip install -r requirements.txt
 pip install -e .
+
 pip install flash-attn==2.5.8 --no-build-isolation
 ```
 
