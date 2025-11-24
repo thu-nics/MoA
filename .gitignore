@@ -8,6 +8,8 @@ output/
 *.bin
 *.pt
 *.csv
+*.qdstrm
+*.pem
 
 # ignore installation files
 *.egg-info
@@ -20,4 +22,3 @@ develop-eggs/
 local/
 our_result/
 push_to_hub.py
-

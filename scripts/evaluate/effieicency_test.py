@@ -5,10 +5,11 @@ import cProfile
 import os
 import time
 import threading
+import math
 
 import torch
 import random
-
+import torch.cuda.nvtx as nvtx
 import argparse
 from typing import List, Optional, Tuple, Union
 from tqdm import tqdm
@@ -25,6 +26,7 @@ try:
 except (ImportError, pynvml.NVMLError) as err:
     print(f"Warning: PYNVML not available: {err}. Power monitoring will be disabled.")
     PYNVML_AVAILABLE = False
+
 
 # !!! remember to calculate only the last logit for lm_head when doing efficiency test.
 # !!! to do this, refer to the return value of LlamaModel_block_sparse_lut_forward function in MoA/models/llama/modeling_llama.py. The same can be done to LlamaModel.forward in the transformers library.
@@ -64,6 +66,8 @@ parser.add_argument('--memory_file_name', type=str, default=None)
 parser.add_argument('--test_mode', type=str, choices=['decode', 'prefill', 'whole'], default='whole')
 parser.add_argument('--monitor_power', action='store_true', help='Monitor GPU power usage during inference')
 parser.add_argument('--power_sample_interval', type=float, default=0.01, help='Power sampling interval in seconds')
+parser.add_argument('--measure_actual_flops', action='store_true', help='Measure actual FLOPs using PyTorch profiler')
+parser.add_argument('--export_flop_trace', type=str, default=None, help='Export FLOP profiler trace to file (Chrome trace format)')
 
 args = parser.parse_args()
 
@@ -73,8 +77,10 @@ def fake_decode(model, tokenizer, prefill_output, max_len):
     pred_token_idx = prefill_output.logits[:, -1, :].argmax(dim=-1).unsqueeze(1)
     # result_idx.append(pred_token_idx.item())
 
-    for _ in tqdm(range(max_len - 1), desc="Decoding"):
+    for step in tqdm(range(max_len - 1), desc="Decoding"):
+        nvtx.range_push(f"decode_step_{step}")
         outputs = model(input_ids=pred_token_idx, past_key_values=past_key_values, use_cache=True)
+        nvtx.range_pop()
         past_key_values = outputs.past_key_values
         # random sample a pred token idx from the logits shape
         pred_token_idx = random.randint(0, outputs.logits.shape[-1] - 1)
@@ -231,6 +237,86 @@ class PowerMonitor:
             print(f"Error getting power info: {e}")
             return None
 
+class FLOPAnalyzer:
+    """Analyzer for measuring actual FLOPs during model execution."""
+    
+    def __init__(self):
+        self.total_flops = 0
+        self.operation_counts = {}
+        self.profiler_results = None
+        self.current_profiler = None
+    
+    def start_profiling(self):
+        """Start FLOP profiling context."""
+        if self.current_profiler is not None:
+            return  # Already profiling
+            
+        self.current_profiler = torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+            record_shapes=True,
+            with_flops=True,
+            with_modules=True,
+        )
+        self.current_profiler.__enter__()
+    
+    def stop_profiling(self):
+        """Stop FLOP profiling and return measured FLOPs."""
+        if self.current_profiler is None:
+            return 0
+            
+        self.current_profiler.__exit__(None, None, None)
+        prof = self.current_profiler
+        self.current_profiler = None
+        self.profiler_results = prof
+        
+        return self._analyze_flops(prof)
+    
+    def _analyze_flops(self, prof):
+        """Analyze profiler results to extract FLOP counts."""
+        total_flops = 0
+        operation_counts = {}
+        
+        for event in prof.events():
+            if hasattr(event, 'flops') and event.flops is not None:
+                total_flops += event.flops
+                op_name = event.name
+                if op_name not in operation_counts:
+                    operation_counts[op_name] = {'count': 0, 'flops': 0}
+                operation_counts[op_name]['count'] += 1
+                operation_counts[op_name]['flops'] += event.flops
+        
+        # Update cumulative counts
+        for op_name, data in operation_counts.items():
+            if op_name not in self.operation_counts:
+                self.operation_counts[op_name] = {'count': 0, 'flops': 0}
+            self.operation_counts[op_name]['count'] += data['count']
+            self.operation_counts[op_name]['flops'] += data['flops']
+        
+        self.total_flops += total_flops
+        return total_flops
+    
+    def get_flop_summary(self):
+        """Get summary of FLOP measurements."""
+        if not self.operation_counts:
+            return "No FLOP data available"
+        
+        summary = f"Total FLOPs measured: {self.total_flops:.2e}\n"
+        summary += "Top operations by FLOPs:\n"
+        
+        # Sort operations by FLOP count
+        sorted_ops = sorted(self.operation_counts.items(), 
+                          key=lambda x: x[1]['flops'], reverse=True)
+        
+        for op_name, data in sorted_ops[:10]:  # Top 10 operations
+            summary += f"  {op_name}: {data['flops']:.2e} FLOPs ({data['count']} calls)\n"
+        
+        return summary
+    
+    def export_chrome_trace(self, path):
+        """Export profiler results for visualization."""
+        if self.profiler_results:
+            self.profiler_results.export_chrome_trace(path)
+
 def run_model(num_iters=5, device="cuda:0"):
    
     tokenizer = AutoTokenizer.from_pretrained(args.model_name, trust_remote_code=False, use_fast=False)
@@ -306,6 +392,11 @@ def run_model(num_iters=5, device="cuda:0"):
 
     print("Start testing")
     
+    # Initialize FLOP analyzer if requested
+    flop_analyzer = None
+    if args.measure_actual_flops:
+        flop_analyzer = FLOPAnalyzer()
+    
     # Start profiling
     if args.profiler:
         profiler = cProfile.Profile()
@@ -331,11 +422,21 @@ def run_model(num_iters=5, device="cuda:0"):
         if power_monitor:
             power_monitor.start_monitoring()
         
+        # Start FLOP profiling if requested
+        if flop_analyzer:
+            flop_analyzer.start_profiling()
+        
         with torch.inference_mode():
-            for _ in range(num_iters):
+            for i in range(num_iters):
+                nvtx.range_push(f"prefill_iter_{i}")
                 output = model(input.input_ids.to(device), use_cache=True, output_hidden_states=False)
+                nvtx.range_pop()
                 print(len(output))
                 output = None
+        
+        # Stop FLOP profiling
+        if flop_analyzer:
+            prefill_flops = flop_analyzer.stop_profiling()
         
         if power_monitor:
             prefill_power_stats = power_monitor.stop_monitoring()
@@ -344,22 +445,46 @@ def run_model(num_iters=5, device="cuda:0"):
         if power_monitor:
             power_monitor.start_monitoring()
         
+        # Start FLOP profiling if requested
+        if flop_analyzer:
+            flop_analyzer.start_profiling()
+        
         with torch.inference_mode():
             for i in range(num_iters):
+                nvtx.range_push(f"decode_iter_{i}")
                 result_idx = fake_decode(model, tokenizer, generation_prefill_output_list[i], args.decode_len)
+                nvtx.range_pop()
                 result_idx = None
+        
+        # Stop FLOP profiling
+        if flop_analyzer:
+            decode_flops = flop_analyzer.stop_profiling()
         
         if power_monitor:
             decode_power_stats = power_monitor.stop_monitoring()
 
     if args.test_mode == 'whole':
+        prefill_flops_total = 0
+        decode_flops_total = 0
+        
         with torch.inference_mode():
             for i in range(num_iters):
                 # Prefill phase with separate power monitoring
                 if power_monitor:
                     power_monitor.start_monitoring()
                 
+                # Start FLOP profiling for prefill
+                if flop_analyzer:
+                    flop_analyzer.start_profiling()
+                
+                nvtx.range_push(f"whole_prefill_iter_{i}")
                 outputs = model(input.input_ids.to(device), use_cache=True, output_hidden_states=False)
+                nvtx.range_pop()
+                
+                # Stop FLOP profiling for prefill
+                if flop_analyzer:
+                    iter_prefill_flops = flop_analyzer.stop_profiling()
+                    prefill_flops_total += iter_prefill_flops
                 
                 if power_monitor:
                     current_prefill_stats = power_monitor.stop_monitoring()
@@ -380,7 +505,18 @@ def run_model(num_iters=5, device="cuda:0"):
                 if power_monitor:
                     power_monitor.start_monitoring()
                 
+                # Start FLOP profiling for decode
+                if flop_analyzer:
+                    flop_analyzer.start_profiling()
+                
+                nvtx.range_push(f"whole_decode_iter_{i}")
                 fake_decode(model, tokenizer, outputs, args.decode_len)
+                nvtx.range_pop()
+                
+                # Stop FLOP profiling for decode
+                if flop_analyzer:
+                    iter_decode_flops = flop_analyzer.stop_profiling()
+                    decode_flops_total += iter_decode_flops
                 
                 if power_monitor:
                     current_decode_stats = power_monitor.stop_monitoring()
@@ -399,6 +535,11 @@ def run_model(num_iters=5, device="cuda:0"):
                 result_idx = None
 
                 print(f"iter {i} done")
+        
+        # Calculate average FLOPs for whole mode
+        if flop_analyzer:
+            prefill_flops = prefill_flops_total / num_iters
+            decode_flops = decode_flops_total / num_iters
 
     if args.profiler:
         profiler.disable()
@@ -423,6 +564,49 @@ def run_model(num_iters=5, device="cuda:0"):
     if args.cuda_cache:
         max_memory = torch.cuda.max_memory_allocated() // 2**20
         print(f"Max memory: {max_memory} MB")
+
+    # Measure actual FLOPs if requested
+    if args.measure_actual_flops:
+        print("\n" + "="*50)
+        print("ACTUAL FLOP MEASUREMENT")
+        print("="*50)
+        
+        if args.test_mode == "prefill":
+            print(f"Prefill FLOPs per iteration: {prefill_flops / num_iters:.2e}")
+            print(f"Prefill FLOPs per token: {prefill_flops / num_iters / args.batch_size / input.input_ids.shape[1]:.2e}")
+            
+        elif args.test_mode == "decode":
+            print(f"Decode FLOPs per iteration: {decode_flops / num_iters:.2e}")
+            print(f"Decode FLOPs per token: {decode_flops / num_iters / args.decode_len / args.batch_size:.2e}")
+            
+        elif args.test_mode == "whole":
+            total_flops_per_iter = prefill_flops + decode_flops
+            prefill_tokens = args.batch_size * input.input_ids.shape[1]
+            decode_tokens = args.batch_size * args.decode_len
+            total_tokens = prefill_tokens + decode_tokens
+            
+            print(f"Prefill FLOPs per iteration: {prefill_flops:.2e}")
+            print(f"Decode FLOPs per iteration: {decode_flops:.2e}")
+            print(f"Total FLOPs per iteration: {total_flops_per_iter:.2e}")
+            print()
+            print("Per-token FLOP breakdown:")
+            print(f"  Prefill FLOPs per token: {prefill_flops / prefill_tokens:.2e}")
+            print(f"  Decode FLOPs per token: {decode_flops / decode_tokens:.2e}")
+            print(f"  Combined FLOPs per token: {total_flops_per_iter / total_tokens:.2e}")
+            print()
+            print(f"Prefill vs Decode FLOP ratio: {prefill_flops / decode_flops:.2f}:1")
+            print(f"Prefill vs Decode per-token ratio: {(prefill_flops / prefill_tokens) / (decode_flops / decode_tokens):.2f}:1")
+        
+        # Print detailed FLOP summary
+        print("\nDetailed FLOP breakdown:")
+        print(flop_analyzer.get_flop_summary())
+        
+        # Export Chrome trace if requested
+        if args.export_flop_trace:
+            flop_analyzer.export_chrome_trace(args.export_flop_trace)
+            print(f"FLOP profiler trace exported to: {args.export_flop_trace}")
+        
+        print("="*50)
 
     # Print power monitoring results
     if args.monitor_power and power_monitor:
