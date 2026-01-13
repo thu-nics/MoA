@@ -218,3 +218,41 @@ CUDA_VISIBLE_DEVICES=0 python scripts/evaluate/chat_demo.py --model_name lmsys/v
 - [ ] Support padding in batch inference
 
 - [ ] Support prefill with past_key_values (use Key-Value cache in multi-round conversation)
+
+## Related Projects
+
+Explore more efficient LLM projects from us:
+
+<table style="border: none; border-collapse: collapse;" align="center">
+<tr>
+<td align="center" width="200" style="border: none; border-right: 1px solid rgba(128, 128, 128, 0.3); padding: 10px;">
+<a href="https://github.com/thu-nics/R2R">
+<img src="https://raw.githubusercontent.com/thu-nics/R2R/main/resource/logo.png" style="max-height: 80px; max-width: 50px; width: auto;" />
+<br/><b>R2R</b>
+</a>
+<br/><sub>Token-level routing for reasoning LLMs</sub>
+</td>
+<td align="center" width="200" style="border: none; border-right: 1px solid rgba(128, 128, 128, 0.3); padding: 10px;">
+<a href="https://github.com/thu-nics/TaH">
+<img src="https://raw.githubusercontent.com/thu-nics/TaH/main/resource/logo.png" style="max-height: 80px; max-width: 50px; width: auto;" />
+<br/><b>TaH</b>
+</a>
+<br/><sub>Selective latent thinking for reasoning LLMs</sub>
+</td>
+<td align="center" width="200" style="border: none; border-right: 1px solid rgba(128, 128, 128, 0.3); padding: 10px;">
+<a href="https://github.com/thu-nics/C2C">
+<img src="https://raw.githubusercontent.com/thu-nics/C2C/main/resource/logo.png" style="max-height: 80px; max-width: 50px; width: auto;" />
+<br/><b>C2C</b>
+</a>
+<br/><sub>Direct KV-cache communication between LLMs</sub>
+</td>
+<td align="center" width="200" style="border: none; padding: 10px;">
+<a href="https://github.com/thu-nics/FrameFusion">
+<img src="https://raw.githubusercontent.com/thu-nics/FrameFusion/main/example/image/logo.jpeg" style="max-height: 80px; max-width: 50px; width: auto;" />
+<br/><b>FrameFusion</b>
+</a>
+<br/><sub>Efficient video token reduction for LVLMs</sub>
+</td>
+</tr>
+</table>
+
