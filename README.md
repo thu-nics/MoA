@@ -244,12 +244,12 @@ Explore more efficient LLM projects from us:
 <img src="https://raw.githubusercontent.com/thu-nics/C2C/main/resource/logo.png" style="max-height: 80px; max-width: 50px; width: auto;" />
 <br/><b>C2C</b>
 </a>
-<br/><sub>Direct KV-cache communication between LLMs</sub>
+<br/><sub>Communicate through KV-Cache between LLMs</sub>
 </td>
 <td align="center" width="200" style="border: none; padding: 10px;">
 <a href="https://github.com/thu-nics/FrameFusion">
 <img src="https://raw.githubusercontent.com/thu-nics/FrameFusion/main/example/image/logo.jpeg" style="max-height: 80px; max-width: 50px; width: auto;" />
-<br/><b>FrameFusion</b>
+<br/><b>FrF</b>
 </a>
 <br/><sub>Efficient video token reduction for LVLMs</sub>
 </td>
