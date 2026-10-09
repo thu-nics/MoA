@@ -6,7 +6,7 @@
   <h3>Optimizing LLM Inference Efficiency with Heterogeneous Sliding-Window Lengths</h3>
 
   <p>
-    <a href="https://thu-nics.github.io/MoA_project_page/">🌐 <b>Project Page</b></a> •
+    <a href="https://fuvty.github.io/thinking_yard_project_page/projects/moa/">🌐 <b>Project Page</b></a> •
     <a href="https://arxiv.org/abs/2406.14909">📑 <b>Paper</b></a>
   </p>
 
@@ -16,13 +16,13 @@
 <tr>
   <!-- Column for the image and text -->
   <td width="60%" valign="top">
-    <img src="https://github.com/thu-nics/MoA_project_page/blob/master/static/images/workflow.png?raw=true" alt="Workflow Intuition" style="width:100%;">
+    <img src="https://fuvty.github.io/thinking_yard_project_page/projects/moa/static/images/workflow.png" alt="Workflow Intuition" style="width:100%;">
     <p>Compressing the attention operation is crucial for the efficiency of processing long inputs. Existing sparse attention methods (more specifically, local attention methods), such as StreamingLLM, adopt uniform and fixed attention masks across different attention heads. Nevertheless, some heads need to attend to more distant information than others; and as the input sequence gets longer, some heads might need to increase their span more than others. In this work, we propose MoA that overcomes the drawbacks of uniform sparse attention by searching heterogeneous elastic rules for each attention head using an automatic pipeline.</p>
   </td>
 
   <!-- Column for the GIF -->
   <td width="40%" valign="top">
-    <img src="https://github.com/thu-nics/MoA_project_page/raw/master/static/images/moa_demo.gif" alt="MoA Demo" style="width:100%;">
+    <img src="https://fuvty.github.io/thinking_yard_project_page/projects/moa/static/images/moa_demo.gif" alt="MoA Demo" style="width:100%;">
   </td>
 </tr>
 </table>
@@ -225,28 +225,35 @@ Explore more efficient LLM projects from us:
 
 <table style="border: none; border-collapse: collapse;" align="center">
 <tr>
-<td align="center" width="200" style="border: none; border-right: 1px solid rgba(128, 128, 128, 0.3); padding: 10px;">
+<td align="center" width="20%" style="border: none; border-right: 1px solid rgba(128, 128, 128, 0.3); padding: 10px;">
 <a href="https://github.com/thu-nics/R2R">
 <img src="https://raw.githubusercontent.com/thu-nics/R2R/main/resource/logo.png" style="max-height: 80px; max-width: 50px; width: auto;" />
 <br/><b>R2R</b>
 </a>
 <br/><sub>Token-level routing for reasoning LLMs</sub>
 </td>
-<td align="center" width="200" style="border: none; border-right: 1px solid rgba(128, 128, 128, 0.3); padding: 10px;">
+<td align="center" width="20%" style="border: none; border-right: 1px solid rgba(128, 128, 128, 0.3); padding: 10px;">
+<a href="https://github.com/thu-nics/TokenRouter">
+<img src="https://raw.githubusercontent.com/thu-nics/TokenRouter/main/resource/logo.png" alt="TokenRouter Logo" style="max-height: 80px; max-width: 50px; width: auto;" />
+<br/><b>TkR</b>
+</a>
+<br/><sub>Efficient serving for token-level LLM routing</sub>
+</td>
+<td align="center" width="20%" style="border: none; border-right: 1px solid rgba(128, 128, 128, 0.3); padding: 10px;">
 <a href="https://github.com/thu-nics/TaH">
 <img src="https://raw.githubusercontent.com/thu-nics/TaH/main/resource/logo.png" style="max-height: 80px; max-width: 50px; width: auto;" />
 <br/><b>TaH</b>
 </a>
 <br/><sub>Selective latent thinking for reasoning LLMs</sub>
 </td>
-<td align="center" width="200" style="border: none; border-right: 1px solid rgba(128, 128, 128, 0.3); padding: 10px;">
+<td align="center" width="20%" style="border: none; border-right: 1px solid rgba(128, 128, 128, 0.3); padding: 10px;">
 <a href="https://github.com/thu-nics/C2C">
 <img src="https://raw.githubusercontent.com/thu-nics/C2C/main/resource/logo.png" style="max-height: 80px; max-width: 50px; width: auto;" />
 <br/><b>C2C</b>
 </a>
 <br/><sub>Communicate through KV-Cache between LLMs</sub>
 </td>
-<td align="center" width="200" style="border: none; padding: 10px;">
+<td align="center" width="20%" style="border: none; padding: 10px;">
 <a href="https://github.com/thu-nics/FrameFusion">
 <img src="https://raw.githubusercontent.com/thu-nics/FrameFusion/main/example/image/logo.png" style="max-height: 80px; max-width: 50px; width: auto;" />
 <br/><b>FrF</b>
